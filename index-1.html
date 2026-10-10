@@ -1,0 +1,2262 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Father's Medical Care & Expense Tracker</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- React & ReactDOM Babel -->
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap');
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+            background-color: #f1f5f9;
+        }
+        .custom-scrollbar::-webkit-scrollbar {
+            width: 6px;
+            height: 6px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-track {
+            background: #f1f5f9;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb {
+            background: #cbd5e1;
+            border-radius: 4px;
+        }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
+            background: #94a3b8;
+        }
+    </style>
+
+<!-- ===== CLOUD SYNC ADD-ON START ===== -->
+<style>
+  #root { visibility: hidden; }
+</style>
+
+<script>
+  /* Part 1: watches the app's own saves to localStorage (no change to app behaviour) */
+  (function () {
+    var KEYS = ['father_patient_info', 'father_vitals_history', 'father_appointments', 'father_reports', 'father_medicines'];
+    var orig = Storage.prototype.setItem;
+    window.__sync = {
+      KEYS: KEYS,
+      onWrite: null,
+      rawSet: function (k, v) { orig.call(window.localStorage, k, v); }
+    };
+    Storage.prototype.setItem = function (k, v) {
+      orig.call(this, k, v);
+      if (this === window.localStorage && KEYS.indexOf(k) > -1 && window.__sync.onWrite) {
+        window.__sync.onWrite(k, String(v));
+      }
+    };
+  })();
+</script>
+
+<script type="module">
+  /* Part 2: Firebase login + real-time sync */
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js";
+  import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+  import { initializeFirestore, persistentLocalCache, persistentMultipleTabManager, doc, onSnapshot, setDoc, getDoc, deleteDoc } from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+  // >>> PASTE YOUR FIREBASE CONFIG VALUES HERE <<<
+  const firebaseConfig = {
+    apiKey: "AIzaSyA5XDoKay7Xo4zhivBuBeDqo_UJGfJGCk4",
+    authDomain: "medisync-001.firebaseapp.com",
+    projectId: "medisync-001",
+    storageBucket: "medisync-001.firebasestorage.app",
+    messagingSenderId: "484030948860",
+    appId: "1:484030948860:web:24f8a672d78e173548be79"
+  };
+
+  const S = window.__sync, KEYS = S.KEYS;
+  const root = document.getElementById('root');
+  const fbApp = initializeApp(firebaseConfig);
+  const auth = getAuth(fbApp);
+  const db = initializeFirestore(fbApp, {
+    localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() })
+  });
+  const ref = doc(db, 'tracker', 'data');
+
+  /* ---------- report attachments (one small document per file) ---------- */
+  window.__attach = {
+    save: function (id, p) {
+      const w = setDoc(doc(db, 'attachments', id), { data: p.dataUrl, name: p.name, type: p.type, updatedAt: Date.now() });
+      return Promise.race([w, new Promise(function (r) { setTimeout(r, 8000); })]); // offline: queued, continue
+    },
+    remove: function (id) { return deleteDoc(doc(db, 'attachments', id)).catch(function () {}); },
+    open: async function (id) {
+      const win = window.open('', '_blank');
+      try {
+        const snap = await getDoc(doc(db, 'attachments', id));
+        if (!snap.exists()) throw new Error('missing');
+        const d = snap.data();
+        const bin = atob(d.data.split(',')[1]);
+        const arr = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) arr[i] = bin.charCodeAt(i);
+        const url = URL.createObjectURL(new Blob([arr], { type: d.type }));
+        if (win) win.location.href = url; else window.location.href = url;
+      } catch (e) {
+        if (win) win.close();
+        alert('Could not open this file. Please check your internet connection and try again.');
+      }
+    }
+  };
+
+  let unsub = null, ready = false, timer = null;
+  const cloud = {};
+  const dirty = new Set();
+
+  /* ---------- small UI: login screen + status pill ---------- */
+  const inp = 'width:100%;box-sizing:border-box;padding:10px;margin-bottom:10px;border:1px solid #cbd5e1;border-radius:8px;font-size:14px';
+  const login = document.createElement('div');
+  login.style.cssText = 'position:fixed;inset:0;z-index:100;background:#0f172a;display:none;align-items:center;justify-content:center;padding:16px';
+  login.innerHTML =
+    '<form style="background:#fff;border-radius:16px;padding:24px;width:100%;max-width:360px;font-family:inherit">' +
+    '<h2 style="font-size:18px;font-weight:700;margin:0 0 4px">Care Tracker</h2>' +
+    '<p style="font-size:12px;color:#64748b;margin:0 0 16px">Sign in to open the shared records.</p>' +
+    '<input type="email" placeholder="Email" autocomplete="username" required style="' + inp + '">' +
+    '<input type="password" placeholder="Password" autocomplete="current-password" required style="' + inp + '">' +
+    '<div style="color:#e11d48;font-size:12px;min-height:16px;margin-bottom:8px"></div>' +
+    '<button type="submit" style="width:100%;padding:10px;border:0;border-radius:8px;background:#0d9488;color:#fff;font-weight:700;font-size:14px;cursor:pointer">Sign in</button>' +
+    '</form>';
+  document.body.appendChild(login);
+  const form = login.querySelector('form');
+  const [emailEl, passEl] = form.querySelectorAll('input');
+  const errEl = form.querySelector('div');
+  const btnEl = form.querySelector('button');
+
+  const pill = document.createElement('div');
+  pill.style.cssText = 'position:fixed;right:10px;bottom:10px;z-index:40;display:none;align-items:center;gap:8px;background:#fff;border:1px solid #e2e8f0;border-radius:999px;padding:4px 10px;font-size:11px;font-weight:600;color:#334155;box-shadow:0 1px 4px rgba(0,0,0,.12)';
+  pill.innerHTML = '<span>●</span><span></span><button style="border:0;background:none;color:#64748b;font-size:11px;text-decoration:underline;cursor:pointer">Sign out</button>';
+  document.body.appendChild(pill);
+  const dotEl = pill.children[0], txtEl = pill.children[1], outEl = pill.children[2];
+
+  function setStatus() {
+    let c, t;
+    if (!navigator.onLine) { c = '#94a3b8'; t = 'Offline - will sync later'; }
+    else if (dirty.size) { c = '#f59e0b'; t = 'Syncing...'; }
+    else { c = '#10b981'; t = 'Synced'; }
+    dotEl.style.color = c;
+    txtEl.textContent = t;
+  }
+  window.addEventListener('online', setStatus);
+  window.addEventListener('offline', setStatus);
+
+  function reveal() {
+    root.style.visibility = 'visible';
+    pill.style.display = 'flex';
+    setStatus();
+  }
+
+  /* ---------- push local changes to the cloud ---------- */
+  function push() {
+    const keys = Array.from(dirty);
+    if (!keys.length) { setStatus(); return; }
+    const data = { updatedAt: Date.now() };
+    keys.forEach(k => { data[k] = localStorage.getItem(k); });
+    setStatus();
+    setDoc(ref, data, { merge: true }).then(() => {
+      keys.forEach(k => {
+        if (localStorage.getItem(k) === data[k]) { dirty.delete(k); cloud[k] = data[k]; }
+      });
+      setStatus();
+    }).catch(e => {
+      console.error('Sync failed', e);
+      clearTimeout(timer);
+      timer = setTimeout(push, 10000);
+      setStatus();
+    });
+  }
+
+  S.onWrite = function (k, v) {
+    if (!ready || cloud[k] === v) return;
+    dirty.add(k);
+    setStatus();
+    clearTimeout(timer);
+    timer = setTimeout(push, 700);
+  };
+
+  /* ---------- apply cloud changes to this device ---------- */
+  function reloadSoon() {
+    const last = Number(sessionStorage.getItem('sync_reload') || 0);
+    if (Date.now() - last < 5000) { // loop guard
+      if (!ready) { ready = true; reveal(); }
+      return;
+    }
+    const go = () => {
+      if (document.querySelector('.fixed.inset-0')) { setTimeout(go, 2000); return; } // wait while a form is open
+      sessionStorage.setItem('sync_reload', String(Date.now()));
+      location.reload();
+    };
+    go();
+  }
+
+  function startSync() {
+    unsub = onSnapshot(ref, snap => {
+      if (!snap.exists() && snap.metadata.fromCache) return; // wait for the server before seeding
+      const d = snap.exists() ? snap.data() : {};
+      let changed = false;
+      KEYS.forEach(k => {
+        if (typeof d[k] !== 'string') return;
+        cloud[k] = d[k];
+        if (dirty.has(k)) return;
+        if (localStorage.getItem(k) !== d[k]) { S.rawSet(k, d[k]); changed = true; }
+      });
+      if (changed) { reloadSoon(); return; }
+      if (!ready) {
+        ready = true;
+        // first ever sign-in: upload whatever this device has
+        KEYS.forEach(k => {
+          if (typeof d[k] !== 'string' && localStorage.getItem(k) !== null) dirty.add(k);
+        });
+        if (dirty.size) push();
+        reveal();
+      }
+      setStatus();
+    }, err => {
+      console.error(err);
+      if (err && err.code === 'permission-denied') {
+        errEl.textContent = 'This account is not allowed to open the tracker.';
+        signOut(auth);
+      }
+    });
+  }
+
+  /* ---------- login / logout ---------- */
+  form.addEventListener('submit', e => {
+    e.preventDefault();
+    errEl.textContent = '';
+    btnEl.disabled = true;
+    signInWithEmailAndPassword(auth, emailEl.value.trim(), passEl.value)
+      .catch(ex => {
+        errEl.textContent = ex.code === 'auth/network-request-failed' ? 'No internet connection.' : 'Wrong email or password.';
+      })
+      .finally(() => { btnEl.disabled = false; });
+  });
+
+  outEl.addEventListener('click', () => {
+    signOut(auth).then(() => {
+      KEYS.forEach(k => localStorage.removeItem(k)); // no medical data left on a signed-out device
+      location.reload();
+    });
+  });
+
+  onAuthStateChanged(auth, user => {
+    if (!user) {
+      if (unsub) { unsub(); unsub = null; }
+      ready = false;
+      dirty.clear();
+      Object.keys(cloud).forEach(k => delete cloud[k]);
+      root.style.visibility = 'hidden';
+      pill.style.display = 'none';
+      login.style.display = 'flex';
+    } else {
+      login.style.display = 'none';
+      if (!unsub) startSync();
+    }
+  });
+</script>
+<!-- ===== CLOUD SYNC ADD-ON END ===== -->
+</head>
+<body class="text-slate-800 antialiased selection:bg-teal-500 selection:text-white">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect, useMemo } = React;
+
+        const TOTAL_SUM_INSURED = 1000000; // 10 Lakhs INR
+
+        // Helper for currency formatting in INR
+        const formatINR = (val) => {
+            return new Intl.NumberFormat('en-IN', {
+                style: 'currency',
+                currency: 'INR',
+                maximumFractionDigits: 0
+            }).format(val || 0);
+        };
+
+        const MAX_ATTACH_CHARS = 850000;
+        const prepareAttachment = (file) => new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onerror = () => reject(new Error('Could not read the file.'));
+            reader.onload = () => {
+                const dataUrl = reader.result;
+                if (file.type === 'application/pdf') {
+                    if (dataUrl.length > MAX_ATTACH_CHARS) return reject(new Error('This PDF is too large (limit about 600 KB). Please attach a photo of the report instead.'));
+                    return resolve({ dataUrl, name: file.name, type: file.type });
+                }
+                if (!file.type.startsWith('image/')) return reject(new Error('Please choose a photo or a PDF.'));
+                const img = new Image();
+                img.onerror = () => reject(new Error('Could not open this image.'));
+                img.onload = () => {
+                    let maxSide = 1600, quality = 0.75, out = '';
+                    for (let i = 0; i < 8; i++) {
+                        const scale = Math.min(1, maxSide / Math.max(img.width, img.height));
+                        const c = document.createElement('canvas');
+                        c.width = Math.round(img.width * scale);
+                        c.height = Math.round(img.height * scale);
+                        c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
+                        out = c.toDataURL('image/jpeg', quality);
+                        if (out.length <= MAX_ATTACH_CHARS) break;
+                        maxSide = Math.round(maxSide * 0.8);
+                        quality = Math.max(0.4, quality - 0.08);
+                    }
+                    if (out.length > MAX_ATTACH_CHARS) return reject(new Error('Image is still too large. Try a smaller photo.'));
+                    resolve({ dataUrl: out, name: file.name.replace(/\.[^.]+$/, '') + '.jpg', type: 'image/jpeg' });
+                };
+                img.src = dataUrl;
+            };
+            reader.readAsDataURL(file);
+        });
+
+        const parseReminderTimes = (str) => (String(str || '').match(/\d{1,2}:\d{2}\s*(?:AM|PM)?/gi) || []).map(t => {
+            const m = t.match(/(\d{1,2}):(\d{2})\s*(AM|PM)?/i);
+            let h = Number(m[1]);
+            const mi = Number(m[2]);
+            const ap = m[3] && m[3].toUpperCase();
+            if (ap === 'PM' && h < 12) h += 12;
+            if (ap === 'AM' && h === 12) h = 0;
+            if (h > 23 || mi > 59) return null;
+            return { h, mi };
+        }).filter(Boolean);
+
+        const downloadMedReminders = (med) => {
+            const times = parseReminderTimes(med.reminderTime);
+            if (!times.length) { alert('Add reminder times like 08:00, 20:00 first (tap Edit on the medicine).'); return; }
+            const pad = (n) => String(n).padStart(2, '0');
+            const d = new Date();
+            const day = `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}`;
+            const stamp = new Date().toISOString().replace(/[-:]/g, '').split('.')[0] + 'Z';
+            const esc = (x) => String(x).replace(/([,;\\])/g, '\\$1').replace(/\n/g, '\\n');
+            const lines = ['BEGIN:VCALENDAR', 'VERSION:2.0', 'PRODID:-//CareTracker//EN', 'CALSCALE:GREGORIAN'];
+            times.forEach((t, i) => {
+                lines.push(
+                    'BEGIN:VEVENT',
+                    `UID:med-${med.id}-${i}-${Date.now()}@caretracker`,
+                    `DTSTAMP:${stamp}`,
+                    `DTSTART:${day}T${pad(t.h)}${pad(t.mi)}00`,
+                    'DURATION:PT15M',
+                    'RRULE:FREQ=DAILY',
+                    `SUMMARY:${esc('Medicine: ' + med.name)}`,
+                    `DESCRIPTION:${esc((med.dosage || '') + ' - ' + (med.timing || ''))}`,
+                    'BEGIN:VALARM',
+                    'ACTION:DISPLAY',
+                    `DESCRIPTION:${esc('Take ' + med.name)}`,
+                    'TRIGGER:PT0M',
+                    'END:VALARM',
+                    'END:VEVENT'
+                );
+            });
+            lines.push('END:VCALENDAR');
+            const blob = new Blob([lines.join('\r\n')], { type: 'text/calendar;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = med.name.replace(/[^a-z0-9]+/gi, '_') + '_reminders.ics';
+            document.body.appendChild(a);
+            a.click();
+            setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1500);
+        };
+
+        const INITIAL_PATIENT = {
+            name: "Ramesh Chandra Sharma",
+            age: 68,
+            weight: "72 kg",
+            height: "5' 8\" (172 cm)",
+            sugar: "Fasting: 124 mg/dL | PP: 168 mg/dL",
+            notes: "Patient is hypertensive & diabetic. Requires low sodium diet. Doctor advised walking 30 mins daily. Allergic to Penicillin."
+        };
+
+        const INITIAL_VITALS = [
+            {
+                id: "vit-1",
+                date: "2026-10-08",
+                time: "08:30 AM",
+                bpSystolic: 128,
+                bpDiastolic: 82,
+                sugar: 124,
+                sugarType: "Fasting",
+                weight: 72.0,
+                pulse: 74,
+                spo2: 98,
+                temp: 98.4,
+                notes: "Morning reading before breakfast. Normal energy levels."
+            },
+            {
+                id: "vit-2",
+                date: "2026-10-08",
+                time: "02:15 PM",
+                bpSystolic: 134,
+                bpDiastolic: 86,
+                sugar: 168,
+                sugarType: "Post-Prandial (PP)",
+                weight: 72.2,
+                pulse: 78,
+                spo2: 97,
+                temp: 98.6,
+                notes: "2 hours after lunch. Slightly high post-meal sugar."
+            },
+            {
+                id: "vit-3",
+                date: "2026-10-05",
+                time: "09:00 AM",
+                bpSystolic: 130,
+                bpDiastolic: 84,
+                sugar: 130,
+                sugarType: "Fasting",
+                weight: 72.5,
+                pulse: 72,
+                spo2: 98,
+                temp: 98.2,
+                notes: "Checked after routine morning walk."
+            }
+        ];
+
+        const INITIAL_APPOINTMENTS = [
+            {
+                id: "apt-1",
+                type: "Appointment", // Appointment or Admission
+                date: "2026-10-02",
+                drName: "Dr. K. K. Verma",
+                specialty: "Cardiologist",
+                hospitalName: "Apollo Hospital, Delhi",
+                fees: 1500,
+                paidBy: "Son (Rahul)",
+                claimType: "Insurance",
+                insuranceStatus: "Claim Credited",
+                claimRef: "INS-2026-8831",
+                notes: "ECG reviewed. Dosage for BP medication adjusted."
+            },
+            {
+                id: "apt-2",
+                type: "Admission", // Hospital Admission record example
+                date: "2026-09-20",
+                drName: "Dr. S. N. Mukherjee",
+                specialty: "Gastroenterologist",
+                hospitalName: "Fortis Escorts Heart Institute",
+                fees: 48500,
+                paidBy: "Son (Rahul)",
+                claimType: "Insurance",
+                insuranceStatus: "Pre-approved Claim Done",
+                claimRef: "INS-2026-7291",
+                notes: "3-day observation for acute stomach gastritis & monitoring. Discharged in stable state."
+            },
+            {
+                id: "apt-3",
+                type: "Appointment",
+                date: "2026-10-08",
+                drName: "Dr. Sunita Mehta",
+                specialty: "Endocrinologist",
+                hospitalName: "Max Super Speciality Hospital",
+                fees: 1200,
+                paidBy: "Self",
+                claimType: "Paid by Self",
+                insuranceStatus: "Pending Claim",
+                claimRef: "",
+                notes: "HbA1c test recommended. Sugar levels under control."
+            },
+            {
+                id: "apt-4",
+                type: "Appointment",
+                date: "2026-10-15",
+                drName: "Dr. Rajesh Gupta",
+                specialty: "Ophthalmologist",
+                hospitalName: "Eye Care Clinic",
+                fees: 800,
+                paidBy: "Daughter (Priya)",
+                claimType: "Insurance",
+                insuranceStatus: "Claim Under Process",
+                claimRef: "INS-2026-9012",
+                notes: "Routine diabetic retinopathy eye checkup."
+            }
+        ];
+
+        const INITIAL_REPORTS = [
+            {
+                id: "rep-1",
+                date: "2026-10-03",
+                reportName: "Comprehensive Lipid Profile & Kidney Function",
+                details: "Cholesterol slightly elevated. Creatinine level normal (0.9 mg/dL).",
+                cost: 3200,
+                paidBy: "Son (Rahul)",
+                claimType: "Insurance",
+                insuranceStatus: "Pre-approved Claim Done",
+                claimRef: "INS-2026-8840",
+                fileUrl: "Lipid_Report_Oct2026.pdf"
+            },
+            {
+                id: "rep-2",
+                date: "2026-10-08",
+                reportName: "HbA1c & Fasting Blood Sugar Report",
+                details: "HbA1c is 6.8%. Target range achieved.",
+                cost: 1100,
+                paidBy: "Self",
+                claimType: "Paid by Self",
+                insuranceStatus: "Pending Claim",
+                claimRef: "",
+                fileUrl: "HbA1c_Oct2026.pdf"
+            },
+            {
+                id: "rep-3",
+                date: "2026-10-12",
+                reportName: "Echocardiogram (2D Echo)",
+                details: "EF 60%. Normal LVI dimensions. No acute changes.",
+                cost: 4500,
+                paidBy: "Son (Rahul)",
+                claimType: "Insurance",
+                insuranceStatus: "Claim Under Process",
+                claimRef: "INS-2026-9055",
+                fileUrl: "2DEcho_Oct2026.pdf"
+            }
+        ];
+
+        const INITIAL_MEDICINES = [
+            {
+                id: "med-1",
+                name: "Glycomet GP 2/500",
+                dosage: "1 Tablet",
+                timing: "Morning & Night (Before Meals)",
+                reminderTime: "08:00, 20:00",
+                reminderActive: true,
+                cost: 1850,
+                paidBy: "Son (Rahul)",
+                claimType: "Insurance",
+                insuranceStatus: "Pending Claim",
+                claimRef: "",
+                duration: "Monthly refill"
+            },
+            {
+                id: "med-2",
+                name: "Telmisartan 40mg",
+                dosage: "1 Tablet",
+                timing: "Morning (After Breakfast)",
+                reminderTime: "09:00",
+                reminderActive: true,
+                cost: 620,
+                paidBy: "Self",
+                claimType: "Paid by Self",
+                insuranceStatus: "Pending Claim",
+                claimRef: "",
+                duration: "Monthly refill"
+            },
+            {
+                id: "med-3",
+                name: "Atorvastatin 10mg",
+                dosage: "1 Tablet",
+                timing: "Night (Before Bed)",
+                reminderTime: "21:30",
+                reminderActive: false,
+                cost: 480,
+                paidBy: "Daughter (Priya)",
+                claimType: "Insurance",
+                insuranceStatus: "Claim Credited",
+                claimRef: "INS-2026-7720",
+                duration: "Monthly refill"
+            }
+        ];
+
+        function App() {
+            // Persistent storage state setup
+            const [activeTab, setActiveTab] = useState('appointments'); // appointments, vitals, reports, medicines, expenses, insurance
+            const [patient, setPatient] = useState(() => {
+                const saved = localStorage.getItem('father_patient_info');
+                return saved ? JSON.parse(saved) : INITIAL_PATIENT;
+            });
+            const [vitals, setVitals] = useState(() => {
+                const saved = localStorage.getItem('father_vitals_history');
+                return saved ? JSON.parse(saved) : INITIAL_VITALS;
+            });
+            const [appointments, setAppointments] = useState(() => {
+                const saved = localStorage.getItem('father_appointments');
+                return saved ? JSON.parse(saved) : INITIAL_APPOINTMENTS;
+            });
+            const [reports, setReports] = useState(() => {
+                const saved = localStorage.getItem('father_reports');
+                return saved ? JSON.parse(saved) : INITIAL_REPORTS;
+            });
+            const [medicines, setMedicines] = useState(() => {
+                const saved = localStorage.getItem('father_medicines');
+                return saved ? JSON.parse(saved) : INITIAL_MEDICINES;
+            });
+
+            // Modal states
+            const [isPatientModalOpen, setIsPatientModalOpen] = useState(false);
+            const [isVitalModalOpen, setIsVitalModalOpen] = useState(false);
+            const [isAptModalOpen, setIsAptModalOpen] = useState(false);
+            const [isReportModalOpen, setIsReportModalOpen] = useState(false);
+            const [isMedModalOpen, setIsMedModalOpen] = useState(false);
+            const [editingItem, setEditingItem] = useState(null);
+
+            // Filter states
+            const [aptTypeFilter, setAptTypeFilter] = useState('ALL'); // ALL, Appointment, Admission
+
+            // LocalStorage sync
+            useEffect(() => {
+                localStorage.setItem('father_patient_info', JSON.stringify(patient));
+            }, [patient]);
+
+            useEffect(() => {
+                localStorage.setItem('father_vitals_history', JSON.stringify(vitals));
+            }, [vitals]);
+
+            useEffect(() => {
+                localStorage.setItem('father_appointments', JSON.stringify(appointments));
+            }, [appointments]);
+
+            useEffect(() => {
+                localStorage.setItem('father_reports', JSON.stringify(reports));
+            }, [reports]);
+
+            useEffect(() => {
+                localStorage.setItem('father_medicines', JSON.stringify(medicines));
+            }, [medicines]);
+
+            // Latest vital record for header summary
+            const latestVital = useMemo(() => {
+                if (!vitals || vitals.length === 0) return null;
+                return [...vitals].sort((a, b) => new Date(b.date + ' ' + (b.time || '00:00')) - new Date(a.date + ' ' + (a.time || '00:00')))[0];
+            }, [vitals]);
+
+            const allExpenses = useMemo(() => {
+                const list = [];
+
+                appointments.forEach(a => {
+                    const isAdmission = a.type === 'Admission';
+                    list.push({
+                        id: a.id,
+                        source: isAdmission ? 'Hospital Admission' : 'Doctor Appointment',
+                        typeTag: a.type || 'Appointment',
+                        icon: isAdmission ? 'fa-hospital-user' : 'fa-user-md',
+                        color: isAdmission ? 'text-purple-700 bg-purple-50 border-purple-200' : 'text-indigo-600 bg-indigo-50 border-indigo-200',
+                        name: `${a.drName} (${a.hospitalName})`,
+                        date: a.date,
+                        amount: Number(a.fees) || 0,
+                        paidBy: a.paidBy || 'Self',
+                        claimType: a.claimType || 'Paid by Self',
+                        insuranceStatus: a.insuranceStatus || 'Pending Claim',
+                        claimRef: a.claimRef || '',
+                        raw: a
+                    });
+                });
+
+                reports.forEach(r => {
+                    list.push({
+                        id: r.id,
+                        source: 'Report / Prescription',
+                        typeTag: 'Lab Test',
+                        icon: 'fa-file-medical',
+                        color: 'text-emerald-600 bg-emerald-50 border-emerald-200',
+                        name: r.reportName,
+                        date: r.date,
+                        amount: Number(r.cost) || 0,
+                        paidBy: r.paidBy || 'Self',
+                        claimType: r.claimType || 'Paid by Self',
+                        insuranceStatus: r.insuranceStatus || 'Pending Claim',
+                        claimRef: r.claimRef || '',
+                        raw: r
+                    });
+                });
+
+                medicines.forEach(m => {
+                    list.push({
+                        id: m.id,
+                        source: 'Medicine & Refills',
+                        typeTag: 'Medication',
+                        icon: 'fa-pills',
+                        color: 'text-amber-600 bg-amber-50 border-amber-200',
+                        name: m.name + ' (' + m.dosage + ')',
+                        date: 'Ongoing / Refill',
+                        amount: Number(m.cost) || 0,
+                        paidBy: m.paidBy || 'Self',
+                        claimType: m.claimType || 'Paid by Self',
+                        insuranceStatus: m.insuranceStatus || 'Pending Claim',
+                        claimRef: m.claimRef || '',
+                        raw: m
+                    });
+                });
+
+                return list;
+            }, [appointments, reports, medicines]);
+
+            // Total expense calculations
+            const totalOverallExpense = useMemo(() => {
+                return allExpenses.reduce((sum, item) => sum + item.amount, 0);
+            }, [allExpenses]);
+
+            const totalClaimableInsurance = useMemo(() => {
+                return allExpenses
+                    .filter(i => i.claimType === 'Insurance')
+                    .reduce((sum, item) => sum + item.amount, 0);
+            }, [allExpenses]);
+
+            const totalPaidBySelfClaimType = useMemo(() => {
+                return allExpenses
+                    .filter(i => i.claimType === 'Paid by Self')
+                    .reduce((sum, item) => sum + item.amount, 0);
+            }, [allExpenses]);
+
+            // Individual Paid By Breakdown
+            const paidByTotals = useMemo(() => {
+                const totals = {};
+                allExpenses.forEach(item => {
+                    const person = item.paidBy || 'Self';
+                    totals[person] = (totals[person] || 0) + item.amount;
+                });
+                return totals;
+            }, [allExpenses]);
+
+            // Insurance Items & Status Totals
+            const insuranceItems = useMemo(() => {
+                return allExpenses.filter(item => item.claimType === 'Insurance');
+            }, [allExpenses]);
+
+            const insuranceStatusTotals = useMemo(() => {
+                const stats = {
+                    'Pending Claim': 0,
+                    'Pre-approved Claim Done': 0,
+                    'Claim Under Process': 0,
+                    'Claim Credited': 0
+                };
+
+                insuranceItems.forEach(item => {
+                    const status = item.insuranceStatus || 'Pending Claim';
+                    if (stats[status] !== undefined) {
+                        stats[status] += item.amount;
+                    } else {
+                        stats['Pending Claim'] += item.amount;
+                    }
+                });
+
+                return stats;
+            }, [insuranceItems]);
+
+            // Update Insurance Status across tabs
+            const updateInsuranceStatus = (id, newStatus, claimRef = '') => {
+                setAppointments(prev => prev.map(item => item.id === id ? { ...item, insuranceStatus: newStatus, claimRef: claimRef !== undefined ? claimRef : item.claimRef } : item));
+                setReports(prev => prev.map(item => item.id === id ? { ...item, insuranceStatus: newStatus, claimRef: claimRef !== undefined ? claimRef : item.claimRef } : item));
+                setMedicines(prev => prev.map(item => item.id === id ? { ...item, insuranceStatus: newStatus, claimRef: claimRef !== undefined ? claimRef : item.claimRef } : item));
+            };
+
+            const filteredAppointments = useMemo(() => {
+                if (aptTypeFilter === 'ALL') return appointments;
+                return appointments.filter(a => (a.type || 'Appointment') === aptTypeFilter);
+            }, [appointments, aptTypeFilter]);
+
+            return (
+                <div className="min-h-screen pb-16">
+                    {/* TOP BRANDING BAR */}
+                    <header className="bg-gradient-to-r from-teal-800 via-teal-700 to-cyan-800 text-white shadow-lg sticky top-0 z-30">
+                        <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-3 flex flex-wrap items-center justify-between gap-3">
+                            <div className="flex items-center space-x-3">
+                                <div className="p-2.5 bg-white/10 backdrop-blur-md rounded-xl border border-white/20">
+                                    <i className="fa-solid fa-heart-pulse text-2xl text-teal-300 animate-pulse"></i>
+                                </div>
+                                <div>
+                                    <h1 className="text-xl font-bold tracking-tight text-white flex items-center gap-2">
+                                        Care, Treatment & Expenses Tracker
+                                    </h1>
+                                    <p className="text-xs text-teal-100/80 font-medium">Appointments, Admissions, Vitals Log, Prescriptions & Insurance Claims</p>
+                                </div>
+                            </div>
+                            <div className="flex items-center gap-2">
+                                <button 
+                                    onClick={() => { setEditingItem(null); setIsVitalModalOpen(true); }}
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-rose-500 hover:bg-rose-400 text-white text-xs font-semibold rounded-lg transition shadow-sm border border-rose-300/30">
+                                    <i className="fa-solid fa-plus-circle"></i>
+                                    Record Vitals
+                                </button>
+                                <button 
+                                    onClick={() => setIsPatientModalOpen(true)}
+                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-teal-500 hover:bg-teal-400 text-white text-xs font-semibold rounded-lg transition shadow-sm border border-teal-300/30">
+                                    <i className="fa-solid fa-pen-to-square"></i>
+                                    Edit Patient Profile
+                                </button>
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* PATIENT SUMMARY CARD HEADER BANNER */}
+                    <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-5">
+                        <div className="bg-white rounded-2xl shadow-sm border border-slate-200/80 overflow-hidden">
+                            <div className="bg-gradient-to-r from-slate-900 to-slate-800 text-white p-4 sm:p-5">
+                                <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-center">
+                                    {/* Patient Basic Info */}
+                                    <div className="lg:col-span-5 flex items-center space-x-4 border-b lg:border-b-0 lg:border-r border-slate-700/80 pb-4 lg:pb-0 lg:pr-4">
+                                        <div className="w-16 h-16 rounded-2xl bg-teal-600/30 border-2 border-teal-400/50 flex items-center justify-center text-teal-300 text-2xl font-bold shrink-0">
+                                            {patient.name ? patient.name.charAt(0) : 'F'}
+                                        </div>
+                                        <div>
+                                            <div className="flex items-center gap-2">
+                                                <h2 className="text-xl font-bold text-white">{patient.name}</h2>
+                                                <span className="px-2.5 py-0.5 rounded-full text-xs font-medium bg-teal-500/20 text-teal-300 border border-teal-500/30">
+                                                    Patient Profile
+                                                </span>
+                                            </div>
+                                            <p className="text-xs text-slate-300 mt-1 flex flex-wrap gap-x-4 gap-y-1">
+                                                <span><i className="fa-solid fa-cake-candles text-teal-400 mr-1.5"></i><strong>Age:</strong> {patient.age} yrs</span>
+                                                <span><i className="fa-solid fa-weight-scale text-teal-400 mr-1.5"></i><strong>Weight:</strong> {latestVital ? `${latestVital.weight} kg` : patient.weight}</span>
+                                                <span><i className="fa-solid fa-ruler-vertical text-teal-400 mr-1.5"></i><strong>Height:</strong> {patient.height}</span>
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    {/* Latest Vitals Summary */}
+                                    <div className="lg:col-span-4 border-b lg:border-b-0 lg:border-r border-slate-700/80 pb-4 lg:pb-0 lg:px-4">
+                                        <div className="text-xs uppercase tracking-wider font-semibold text-slate-400 mb-1 flex items-center justify-between">
+                                            <span><i className="fa-solid fa-heart-pulse text-rose-400 mr-1.5"></i>Latest Vitals</span>
+                                            {latestVital && <span className="text-[10px] text-teal-300 lowercase">({latestVital.date})</span>}
+                                        </div>
+                                        <div className="grid grid-cols-2 gap-2 text-xs">
+                                            <div className="bg-slate-800/90 border border-slate-700 p-2 rounded-xl">
+                                                <span className="text-slate-400 block text-[10px]">BLOOD PRESSURE</span>
+                                                <span className="font-bold text-emerald-300 text-sm">
+                                                    {latestVital ? `${latestVital.bpSystolic}/${latestVital.bpDiastolic} mmHg` : '128/82 mmHg'}
+                                                </span>
+                                            </div>
+                                            <div className="bg-slate-800/90 border border-slate-700 p-2 rounded-xl">
+                                                <span className="text-slate-400 block text-[10px]">BLOOD SUGAR</span>
+                                                <span className="font-bold text-rose-300 text-sm">
+                                                    {latestVital ? `${latestVital.sugar} mg/dL (${latestVital.sugarType || 'Fasting'})` : patient.sugar}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Patient Specific Notes */}
+                                    <div className="lg:col-span-3 pl-0 lg:pl-2">
+                                        <div className="text-xs uppercase tracking-wider font-semibold text-slate-400 mb-1 flex items-center justify-between">
+                                            <span><i className="fa-solid fa-note-sticky text-amber-400 mr-1.5"></i>Doctor Notes</span>
+                                        </div>
+                                        <div className="text-xs text-slate-200 bg-slate-800/80 border border-slate-700/80 p-2 rounded-xl leading-relaxed max-h-16 overflow-y-auto custom-scrollbar">
+                                            {patient.notes || 'No specific notes added.'}
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 mt-6">
+                        {/* TAB NAVIGATION */}
+                        <div className="flex border-b border-slate-200 bg-white rounded-xl shadow-sm p-1.5 mb-6 overflow-x-auto custom-scrollbar">
+                            <button
+                                onClick={() => setActiveTab('appointments')}
+                                className={`flex items-center gap-2 px-4 py-2.5 text-sm font-semibold rounded-lg transition-all whitespace-nowrap ${
+                                    activeTab === 'appointments'
+                                        ? 'bg-teal-600 text-white shadow'
+                                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                                }`}>
+                                <i className="fa-solid fa-hospital-user"></i>
+                                Appointments & Admissions
+                                <span className={`ml-1 text-xs px-2 py-0.5 rounded-full ${activeTab === 'appointments' ? 'bg-teal-700 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                                    {appointments.length}
+                                </span>
+                            </button>
+
+                            <button
+                                onClick={() => setActiveTab('vitals')}
+                                className={`flex items-center gap-2 px-4 py-2.5 text-sm font-semibold rounded-lg transition-all whitespace-nowrap ${
+                                    activeTab === 'vitals'
+                                        ? 'bg-teal-600 text-white shadow'
+                                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                                }`}>
+                                <i className="fa-solid fa-heart-pulse text-rose-400"></i>
+                                Vitals Tracker (BP/Sugar)
+                                <span className={`ml-1 text-xs px-2 py-0.5 rounded-full ${activeTab === 'vitals' ? 'bg-teal-700 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                                    {vitals.length}
+                                </span>
+                            </button>
+
+                            <button
+                                onClick={() => setActiveTab('reports')}
+                                className={`flex items-center gap-2 px-4 py-2.5 text-sm font-semibold rounded-lg transition-all whitespace-nowrap ${
+                                    activeTab === 'reports'
+                                        ? 'bg-teal-600 text-white shadow'
+                                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                                }`}>
+                                <i className="fa-solid fa-file-waveform"></i>
+                                Reports & Prescriptions
+                                <span className={`ml-1 text-xs px-2 py-0.5 rounded-full ${activeTab === 'reports' ? 'bg-teal-700 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                                    {reports.length}
+                                </span>
+                            </button>
+
+                            <button
+                                onClick={() => setActiveTab('medicines')}
+                                className={`flex items-center gap-2 px-4 py-2.5 text-sm font-semibold rounded-lg transition-all whitespace-nowrap ${
+                                    activeTab === 'medicines'
+                                        ? 'bg-teal-600 text-white shadow'
+                                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                                }`}>
+                                <i className="fa-solid fa-capsules"></i>
+                                Medicines & Reminders
+                                <span className={`ml-1 text-xs px-2 py-0.5 rounded-full ${activeTab === 'medicines' ? 'bg-teal-700 text-white' : 'bg-slate-200 text-slate-700'}`}>
+                                    {medicines.length}
+                                </span>
+                            </button>
+
+                            <button
+                                onClick={() => setActiveTab('expenses')}
+                                className={`flex items-center gap-2 px-4 py-2.5 text-sm font-semibold rounded-lg transition-all whitespace-nowrap ${
+                                    activeTab === 'expenses'
+                                        ? 'bg-teal-600 text-white shadow'
+                                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                                }`}>
+                                <i className="fa-solid fa-calculator"></i>
+                                Expense Tracker
+                                <span className="ml-1 text-xs px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold">
+                                    {formatINR(totalOverallExpense)}
+                                </span>
+                            </button>
+
+                            <button
+                                onClick={() => setActiveTab('insurance')}
+                                className={`flex items-center gap-2 px-4 py-2.5 text-sm font-semibold rounded-lg transition-all whitespace-nowrap ${
+                                    activeTab === 'insurance'
+                                        ? 'bg-teal-600 text-white shadow'
+                                        : 'text-slate-600 hover:text-slate-900 hover:bg-slate-100'
+                                }`}>
+                                <i className="fa-solid fa-shield-halved"></i>
+                                Insurance Claims
+                                <span className="ml-1 text-xs px-2 py-0.5 rounded-full bg-indigo-100 text-indigo-800 font-bold">
+                                    {insuranceItems.length}
+                                </span>
+                            </button>
+                        </div>
+
+                        {/* TAB CONTENTS */}
+
+                        {activeTab === 'appointments' && (
+                            <div className="space-y-4">
+                                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                            <i className="fa-solid fa-hospital-user text-teal-600"></i> Appointments & Admissions
+                                        </h3>
+                                        <p className="text-xs text-slate-500">Track doctor visits and hospital admissions, fees, doctor names, paid by column, and insurance status.</p>
+                                    </div>
+
+                                    <div className="flex flex-wrap items-center gap-3 w-full sm:w-auto">
+                                        {/* Filter Dropdown */}
+                                        <select
+                                            value={aptTypeFilter}
+                                            onChange={(e) => setAptTypeFilter(e.target.value)}
+                                            className="text-xs font-semibold px-3 py-2 rounded-lg border border-slate-300 bg-slate-50 focus:ring-2 focus:ring-teal-500 outline-none">
+                                            <option value="ALL">All Types ({appointments.length})</option>
+                                            <option value="Appointment">Appointments Only</option>
+                                            <option value="Admission">Admissions Only</option>
+                                        </select>
+
+                                        <button
+                                            onClick={() => { setEditingItem(null); setIsAptModalOpen(true); }}
+                                            className="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold rounded-lg transition shadow-sm flex items-center gap-2 shrink-0">
+                                            <i className="fa-solid fa-plus"></i> Add Entry
+                                        </button>
+                                    </div>
+                                </div>
+
+                                {/* List Table */}
+                                <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-left text-sm text-slate-600">
+                                            <thead className="bg-slate-50 text-xs font-semibold uppercase tracking-wider text-slate-500 border-b border-slate-200">
+                                                <tr>
+                                                    <th className="p-3.5">Category</th>
+                                                    <th className="p-3.5">Date</th>
+                                                    <th className="p-3.5">Doctor & Specialty</th>
+                                                    <th className="p-3.5">Hospital / Clinic</th>
+                                                    <th className="p-3.5">Fees / Charges (₹)</th>
+                                                    <th className="p-3.5">Paid By</th>
+                                                    <th className="p-3.5">Claim Status</th>
+                                                    <th className="p-3.5 text-right">Actions</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-200">
+                                                {filteredAppointments.length === 0 ? (
+                                                    <tr>
+                                                        <td colSpan="8" className="text-center py-8 text-slate-400">No appointments or admissions found for selected filter.</td>
+                                                    </tr>
+                                                ) : (
+                                                    filteredAppointments.map((apt) => {
+                                                        const isAdmission = apt.type === 'Admission';
+                                                        return (
+                                                            <tr key={apt.id} className="hover:bg-slate-50/80 transition">
+                                                                <td className="p-3.5 whitespace-nowrap">
+                                                                    <span className={`inline-flex items-center px-2.5 py-1 rounded-full text-xs font-bold ${
+                                                                        isAdmission 
+                                                                            ? 'bg-purple-100 text-purple-800 border border-purple-200' 
+                                                                            : 'bg-teal-100 text-teal-800 border border-teal-200'
+                                                                    }`}>
+                                                                        <i className={`fa-solid ${isAdmission ? 'fa-hospital' : 'fa-user-md'} mr-1.5`}></i>
+                                                                        {apt.type || 'Appointment'}
+                                                                    </span>
+                                                                </td>
+                                                                <td className="p-3.5 font-medium text-slate-900 whitespace-nowrap">
+                                                                    <i className="fa-regular fa-calendar text-teal-600 mr-1.5"></i>
+                                                                    {apt.date}
+                                                                </td>
+                                                                <td className="p-3.5">
+                                                                    <div className="font-semibold text-slate-900">{apt.drName}</div>
+                                                                    <div className="text-xs text-slate-500">{apt.specialty}</div>
+                                                                </td>
+                                                                <td className="p-3.5 text-slate-700">{apt.hospitalName}</td>
+                                                                <td className="p-3.5 font-bold text-slate-900 whitespace-nowrap">
+                                                                    {formatINR(apt.fees)}
+                                                                </td>
+                                                                <td className="p-3.5">
+                                                                    <span className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-slate-100 text-slate-800 border border-slate-200">
+                                                                        <i className="fa-solid fa-wallet text-slate-400 mr-1.5"></i>
+                                                                        {apt.paidBy || 'Self'}
+                                                                    </span>
+                                                                </td>
+                                                                <td className="p-3.5">
+                                                                    {apt.claimType === 'Insurance' ? (
+                                                                        <div className="space-y-1">
+                                                                            <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                                                                                <i className="fa-solid fa-shield-heart mr-1.5"></i> Insurance Claim
+                                                                            </span>
+                                                                            <div className="text-xs text-slate-500 font-medium flex items-center gap-1">
+                                                                                <span className={`w-2 h-2 rounded-full ${
+                                                                                    apt.insuranceStatus === 'Claim Credited' ? 'bg-emerald-500' :
+                                                                                    apt.insuranceStatus === 'Claim Under Process' ? 'bg-amber-500' :
+                                                                                    apt.insuranceStatus === 'Pre-approved Claim Done' ? 'bg-blue-500' : 'bg-slate-400'
+                                                                                }`}></span>
+                                                                                {apt.insuranceStatus || 'Pending Claim'}
+                                                                            </div>
+                                                                        </div>
+                                                                    ) : (
+                                                                        <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+                                                                            <i className="fa-solid fa-user-check mr-1.5"></i> Paid by Self
+                                                                        </span>
+                                                                    )}
+                                                                </td>
+                                                                <td className="p-3.5 text-right whitespace-nowrap">
+                                                                    <button
+                                                                        onClick={() => { setEditingItem(apt); setIsAptModalOpen(true); }}
+                                                                        className="p-1.5 text-slate-500 hover:text-teal-600 transition mr-2"
+                                                                        title="Edit">
+                                                                        <i className="fa-solid fa-pen"></i>
+                                                                    </button>
+                                                                    <button
+                                                                        onClick={() => setAppointments(appointments.filter(a => a.id !== apt.id))}
+                                                                        className="p-1.5 text-slate-500 hover:text-rose-600 transition"
+                                                                        title="Delete">
+                                                                        <i className="fa-solid fa-trash"></i>
+                                                                    </button>
+                                                                </td>
+                                                            </tr>
+                                                        );
+                                                    })
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'vitals' && (
+                            <div className="space-y-6">
+                                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                            <i className="fa-solid fa-heart-pulse text-rose-500"></i> Patient Vitals Tracker
+                                        </h3>
+                                        <p className="text-xs text-slate-500">Record daily Blood Pressure (BP), Blood Sugar levels, Weight, Pulse rate, SpO2 & Temperature.</p>
+                                    </div>
+                                    <button
+                                        onClick={() => { setEditingItem(null); setIsVitalModalOpen(true); }}
+                                        className="px-4 py-2 bg-rose-600 hover:bg-rose-700 text-white text-sm font-semibold rounded-lg transition shadow-sm flex items-center gap-2">
+                                        <i className="fa-solid fa-plus"></i> Add New Vitals Reading
+                                    </button>
+                                </div>
+
+                                {/* QUICK STAT CARDS FOR LATEST RECORD */}
+                                {latestVital && (
+                                    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                                        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm">
+                                            <div className="text-[11px] font-bold uppercase text-slate-400 mb-1 flex justify-between">
+                                                <span>BP (mmHg)</span>
+                                                <i className="fa-solid fa-heart-pulse text-rose-500"></i>
+                                            </div>
+                                            <div className="text-lg font-extrabold text-slate-900">
+                                                {latestVital.bpSystolic}/{latestVital.bpDiastolic}
+                                            </div>
+                                            <div className="text-[10px] text-slate-500 mt-0.5">
+                                                {latestVital.bpSystolic > 135 ? 'Elevated BP' : 'Optimal'}
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm">
+                                            <div className="text-[11px] font-bold uppercase text-slate-400 mb-1 flex justify-between">
+                                                <span>Blood Sugar</span>
+                                                <i className="fa-solid fa-droplet text-rose-500"></i>
+                                            </div>
+                                            <div className="text-lg font-extrabold text-slate-900">
+                                                {latestVital.sugar} <span className="text-xs font-normal text-slate-500">mg/dL</span>
+                                            </div>
+                                            <div className="text-[10px] text-teal-600 font-medium mt-0.5">
+                                                {latestVital.sugarType || 'Fasting'}
+                                            </div>
+                                        </div>
+
+                                        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm">
+                                            <div className="text-[11px] font-bold uppercase text-slate-400 mb-1 flex justify-between">
+                                                <span>Weight</span>
+                                                <i className="fa-solid fa-weight-scale text-indigo-500"></i>
+                                            </div>
+                                            <div className="text-lg font-extrabold text-slate-900">
+                                                {latestVital.weight} <span className="text-xs font-normal text-slate-500">kg</span>
+                                            </div>
+                                            <div className="text-[10px] text-slate-500 mt-0.5">Body Weight</div>
+                                        </div>
+
+                                        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm">
+                                            <div className="text-[11px] font-bold uppercase text-slate-400 mb-1 flex justify-between">
+                                                <span>Pulse</span>
+                                                <i className="fa-solid fa-wave-square text-emerald-500"></i>
+                                            </div>
+                                            <div className="text-lg font-extrabold text-slate-900">
+                                                {latestVital.pulse || '--'} <span className="text-xs font-normal text-slate-500">bpm</span>
+                                            </div>
+                                            <div className="text-[10px] text-slate-500 mt-0.5">Heart Rate</div>
+                                        </div>
+
+                                        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm">
+                                            <div className="text-[11px] font-bold uppercase text-slate-400 mb-1 flex justify-between">
+                                                <span>SpO2 %</span>
+                                                <i className="fa-solid fa-lungs text-cyan-500"></i>
+                                            </div>
+                                            <div className="text-lg font-extrabold text-slate-900">
+                                                {latestVital.spo2 || '--'}%
+                                            </div>
+                                            <div className="text-[10px] text-slate-500 mt-0.5">Oxygen Level</div>
+                                        </div>
+
+                                        <div className="bg-white border border-slate-200 rounded-xl p-3.5 shadow-sm">
+                                            <div className="text-[11px] font-bold uppercase text-slate-400 mb-1 flex justify-between">
+                                                <span>Temp (°F)</span>
+                                                <i className="fa-solid fa-temperature-half text-amber-500"></i>
+                                            </div>
+                                            <div className="text-lg font-extrabold text-slate-900">
+                                                {latestVital.temp || '--'}°F
+                                            </div>
+                                            <div className="text-[10px] text-slate-500 mt-0.5">Body Temp</div>
+                                        </div>
+                                    </div>
+                                )}
+
+                                {/* VITALS HISTORY TABLE */}
+                                <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                                    <div className="p-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+                                        <h4 className="font-bold text-slate-900 text-sm">
+                                            Vitals Log & Tracking History
+                                        </h4>
+                                        <span className="text-xs text-slate-500">Sorted by Date & Time</span>
+                                    </div>
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-left text-sm text-slate-600">
+                                            <thead className="bg-slate-100 text-xs font-semibold uppercase tracking-wider text-slate-500 border-b border-slate-200">
+                                                <tr>
+                                                    <th className="p-3.5">Date & Time</th>
+                                                    <th className="p-3.5">Blood Pressure</th>
+                                                    <th className="p-3.5">Blood Sugar</th>
+                                                    <th className="p-3.5">Weight (kg)</th>
+                                                    <th className="p-3.5">Pulse & SpO2</th>
+                                                    <th className="p-3.5">Notes</th>
+                                                    <th className="p-3.5 text-right">Actions</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-200">
+                                                {vitals.length === 0 ? (
+                                                    <tr>
+                                                        <td colSpan="7" className="text-center py-8 text-slate-400">No vitals logged yet. Click "Add New Vitals Reading" above to record BP, Sugar, Weight.</td>
+                                                    </tr>
+                                                ) : (
+                                                    vitals.map((v) => (
+                                                        <tr key={v.id} className="hover:bg-slate-50 transition">
+                                                            <td className="p-3.5 whitespace-nowrap">
+                                                                <div className="font-semibold text-slate-900">{v.date}</div>
+                                                                <div className="text-xs text-slate-400">{v.time || '10:00 AM'}</div>
+                                                            </td>
+                                                            <td className="p-3.5 whitespace-nowrap">
+                                                                <span className="font-bold text-slate-900">{v.bpSystolic}/{v.bpDiastolic}</span>
+                                                                <span className="text-xs text-slate-400 ml-1">mmHg</span>
+                                                            </td>
+                                                            <td className="p-3.5 whitespace-nowrap">
+                                                                <div className="font-bold text-rose-600">{v.sugar} mg/dL</div>
+                                                                <div className="text-[11px] text-slate-500">{v.sugarType || 'Fasting'}</div>
+                                                            </td>
+                                                            <td className="p-3.5 font-bold text-slate-800 whitespace-nowrap">
+                                                                {v.weight} kg
+                                                            </td>
+                                                            <td className="p-3.5 text-xs whitespace-nowrap">
+                                                                <div>Pulse: <strong className="text-slate-800">{v.pulse || '--'} bpm</strong></div>
+                                                                <div>SpO2: <strong className="text-slate-800">{v.spo2 || '--'}%</strong></div>
+                                                            </td>
+                                                            <td className="p-3.5 text-xs text-slate-600 max-w-xs">
+                                                                {v.notes || '-'}
+                                                            </td>
+                                                            <td className="p-3.5 text-right whitespace-nowrap">
+                                                                <button
+                                                                    onClick={() => { setEditingItem(v); setIsVitalModalOpen(true); }}
+                                                                    className="p-1.5 text-slate-500 hover:text-teal-600 transition mr-2"
+                                                                    title="Edit">
+                                                                    <i className="fa-solid fa-pen"></i>
+                                                                </button>
+                                                                <button
+                                                                    onClick={() => setVitals(vitals.filter(item => item.id !== v.id))}
+                                                                    className="p-1.5 text-slate-500 hover:text-rose-600 transition"
+                                                                    title="Delete">
+                                                                    <i className="fa-solid fa-trash"></i>
+                                                                </button>
+                                                            </td>
+                                                        </tr>
+                                                    ))
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'reports' && (
+                            <div className="space-y-4">
+                                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                            <i className="fa-solid fa-file-waveform text-teal-600"></i> Reports & Prescriptions
+                                        </h3>
+                                        <p className="text-xs text-slate-500">Save lab reports, prescriptions, test costs, paid by column, and reimbursement flags.</p>
+                                    </div>
+                                    <button
+                                        onClick={() => { setEditingItem(null); setIsReportModalOpen(true); }}
+                                        className="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold rounded-lg transition shadow-sm flex items-center gap-2">
+                                        <i className="fa-solid fa-cloud-arrow-up"></i> Add Report / Document
+                                    </button>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                    {reports.length === 0 ? (
+                                        <div className="col-span-full text-center py-12 bg-white rounded-xl border border-slate-200 text-slate-400">
+                                            No reports or prescriptions uploaded yet.
+                                        </div>
+                                    ) : (
+                                        reports.map((rep) => (
+                                            <div key={rep.id} className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 hover:shadow-md transition flex flex-col justify-between">
+                                                <div>
+                                                    <div className="flex justify-between items-start mb-2">
+                                                        <span className="px-2.5 py-1 bg-emerald-50 text-emerald-700 font-semibold text-xs rounded-lg border border-emerald-200 flex items-center gap-1.5">
+                                                            <i className="fa-solid fa-file-medical"></i> Lab / Diagnostic
+                                                        </span>
+                                                        <span className="text-xs text-slate-500 font-medium">
+                                                            <i className="fa-regular fa-calendar mr-1"></i>{rep.date}
+                                                        </span>
+                                                    </div>
+                                                    <h4 className="font-bold text-slate-900 text-base mb-1">{rep.reportName}</h4>
+                                                    <p className="text-xs text-slate-600 mb-3 line-clamp-3 bg-slate-50 p-2 rounded-lg border border-slate-100">
+                                                        {rep.details || 'No detailed summary provided.'}
+                                                    </p>
+                                                </div>
+
+                                                <div className="space-y-2 border-t border-slate-100 pt-3 mt-2">
+                                                    <div className="flex justify-between items-center text-xs">
+                                                        <span className="text-slate-500">Report Cost:</span>
+                                                        <span className="font-bold text-slate-900 text-sm">{formatINR(rep.cost)}</span>
+                                                    </div>
+                                                    <div className="flex justify-between items-center text-xs">
+                                                        <span className="text-slate-500">Paid By:</span>
+                                                        <span className="font-semibold text-slate-800">{rep.paidBy || 'Self'}</span>
+                                                    </div>
+                                                    <div className="flex justify-between items-center text-xs">
+                                                        <span className="text-slate-500">Claim Option:</span>
+                                                        {rep.claimType === 'Insurance' ? (
+                                                            <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                                                                <i className="fa-solid fa-shield-halved mr-1"></i> Claimed ({rep.insuranceStatus})
+                                                            </span>
+                                                        ) : (
+                                                            <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+                                                                Paid by Self
+                                                            </span>
+                                                        )}
+                                                    </div>
+
+                                                    <div className="flex justify-between items-center pt-2 border-t border-slate-100">
+                                                        {rep.fileUrl ? (
+                                                            <span className="text-xs text-teal-600 font-medium flex items-center gap-1">
+                                                                <i className="fa-solid fa-paperclip"></i> {rep.fileUrl}{rep.fileId && (<button type="button" onClick={() => window.__attach && window.__attach.open(rep.fileId)} className="ml-2 px-2 py-0.5 rounded bg-teal-600 text-white text-[11px] font-semibold hover:bg-teal-700">Open</button>)}
+                                                            </span>
+                                                        ) : <span />}
+
+                                                        <div className="flex items-center gap-2">
+                                                            <button
+                                                                onClick={() => { setEditingItem(rep); setIsReportModalOpen(true); }}
+                                                                className="text-xs px-2 py-1 text-slate-600 hover:text-teal-600 font-medium">
+                                                                <i className="fa-solid fa-pen mr-1"></i> Edit
+                                                            </button>
+                                                            <button
+                                                                onClick={() => { if (rep.fileId && window.__attach) window.__attach.remove(rep.fileId); setReports(reports.filter(r => r.id !== rep.id)); }}
+                                                                className="text-xs px-2 py-1 text-slate-600 hover:text-rose-600 font-medium">
+                                                                <i className="fa-solid fa-trash mr-1"></i> Delete
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'medicines' && (
+                            <div className="space-y-4">
+                                <div className="flex flex-col sm:flex-row justify-between items-start sm:items-center gap-4 bg-white p-4 rounded-xl shadow-sm border border-slate-200">
+                                    <div>
+                                        <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                            <i className="fa-solid fa-capsules text-teal-600"></i> Medicines & Schedules
+                                        </h3>
+                                        <p className="text-xs text-slate-500">Track medication timings, set daily reminders, refill costs, paid by column, and payment options.</p>
+                                    </div>
+                                    <button
+                                        onClick={() => { setEditingItem(null); setIsMedModalOpen(true); }}
+                                        className="px-4 py-2 bg-teal-600 hover:bg-teal-700 text-white text-sm font-semibold rounded-lg transition shadow-sm flex items-center gap-2">
+                                        <i className="fa-solid fa-plus"></i> Add Medicine
+                                    </button>
+                                </div>
+
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                                    {medicines.length === 0 ? (
+                                        <div className="col-span-full text-center py-12 bg-white rounded-xl border border-slate-200 text-slate-400">
+                                            No active medicines listed.
+                                        </div>
+                                    ) : (
+                                        medicines.map((med) => (
+                                            <div key={med.id} className="bg-white rounded-xl shadow-sm border border-slate-200 p-4 relative overflow-hidden flex flex-col justify-between">
+                                                <div className="top-0 left-0 w-1.5 h-full bg-teal-500 absolute"></div>
+                                                <div className="pl-2">
+                                                    <div className="flex justify-between items-start mb-2">
+                                                        <h4 className="font-bold text-slate-900 text-base">{med.name}</h4>
+                                                        <button 
+                                                            onClick={() => {
+                                                                setMedicines(medicines.map(m => m.id === med.id ? { ...m, reminderActive: !m.reminderActive } : m));
+                                                            }}
+                                                            className={`px-2.5 py-1 rounded-full text-xs font-semibold flex items-center gap-1 transition ${
+                                                                med.reminderActive 
+                                                                    ? 'bg-amber-100 text-amber-800 border border-amber-300' 
+                                                                    : 'bg-slate-100 text-slate-500'
+                                                            }`}>
+                                                            <i className={`fa-solid ${med.reminderActive ? 'fa-bell text-amber-600' : 'fa-bell-slash'}`}></i>
+                                                            {med.reminderActive ? 'Reminder Active' : 'Off'}
+                                                        </button>
+                                                    </div>
+
+                                                    <div className="space-y-1.5 my-3 text-xs text-slate-600">
+                                                        <div className="flex items-center gap-2 text-slate-800 font-medium">
+                                                            <i className="fa-solid fa-pills text-teal-600"></i>
+                                                            Dosage: {med.dosage}
+                                                        </div>
+                                                        <div className="flex items-center gap-2">
+                                                            <i className="fa-solid fa-clock text-indigo-500"></i>
+                                                            Schedule: <span className="font-semibold text-slate-900">{med.timing}</span>
+                                                        </div>
+                                                        {med.reminderTime && (
+                                                            <div className="flex items-center gap-2 text-slate-500">
+                                                                <i className="fa-solid fa-stopwatch text-slate-400"></i>
+                                                                Alarm Slot: {med.reminderTime}
+                                                                <button type="button" onClick={() => downloadMedReminders(med)} className="ml-auto px-2 py-0.5 rounded bg-amber-500 text-white text-[11px] font-semibold hover:bg-amber-600"><i className="fa-solid fa-calendar-plus mr-1"></i>Add to calendar</button>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </div>
+
+                                                <div className="pl-2 pt-3 border-t border-slate-100 space-y-2 text-xs">
+                                                    <div className="flex justify-between items-center">
+                                                        <span className="text-slate-500">Refill Cost:</span>
+                                                        <span className="font-bold text-slate-900 text-sm">{formatINR(med.cost)}</span>
+                                                    </div>
+                                                    <div className="flex justify-between items-center">
+                                                        <span className="text-slate-500">Paid By:</span>
+                                                        <span className="font-semibold text-slate-800">{med.paidBy || 'Self'}</span>
+                                                    </div>
+                                                    <div className="flex justify-between items-center">
+                                                        <span className="text-slate-500">Claim Status:</span>
+                                                        {med.claimType === 'Insurance' ? (
+                                                            <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                                                                <i className="fa-solid fa-shield-halved mr-1"></i> Claimed
+                                                            </span>
+                                                        ) : (
+                                                            <span className="px-2 py-0.5 rounded text-[11px] font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+                                                                Paid by Self
+                                                            </span>
+                                                        )}
+                                                    </div>
+
+                                                    <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                                                        <button
+                                                            onClick={() => { setEditingItem(med); setIsMedModalOpen(true); }}
+                                                            className="px-2 py-1 text-slate-600 hover:text-teal-600 font-medium">
+                                                            <i className="fa-solid fa-pen mr-1"></i> Edit
+                                                        </button>
+                                                        <button
+                                                            onClick={() => setMedicines(medicines.filter(m => m.id !== med.id))}
+                                                            className="px-2 py-1 text-slate-600 hover:text-rose-600 font-medium">
+                                                            <i className="fa-solid fa-trash mr-1"></i> Delete
+                                                        </button>
+                                                    </div>
+                                                </div>
+                                            </div>
+                                        ))
+                                    )}
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'expenses' && (
+                            <div className="space-y-6">
+                                {/* SUMMARY CARDS */}
+                                <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex items-center justify-between">
+                                        <div>
+                                            <div className="text-xs uppercase tracking-wider font-semibold text-slate-500 mb-1">
+                                                Total Medical Expense
+                                            </div>
+                                            <div className="text-2xl font-extrabold text-slate-900">
+                                                {formatINR(totalOverallExpense)}
+                                            </div>
+                                            <p className="text-xs text-slate-500 mt-1">Aggregated across all tabs</p>
+                                        </div>
+                                        <div className="w-12 h-12 rounded-xl bg-teal-50 text-teal-600 flex items-center justify-center text-xl">
+                                            <i className="fa-solid fa-wallet"></i>
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex items-center justify-between">
+                                        <div>
+                                            <div className="text-xs uppercase tracking-wider font-semibold text-indigo-600 mb-1">
+                                                Will be Claimed in Insurance
+                                            </div>
+                                            <div className="text-2xl font-extrabold text-indigo-900">
+                                                {formatINR(totalClaimableInsurance)}
+                                            </div>
+                                            <p className="text-xs text-indigo-600/80 mt-1">
+                                                {((totalClaimableInsurance / (totalOverallExpense || 1)) * 100).toFixed(0)}% of total expenses
+                                            </p>
+                                        </div>
+                                        <div className="w-12 h-12 rounded-xl bg-indigo-50 text-indigo-600 flex items-center justify-center text-xl">
+                                            <i className="fa-solid fa-shield-heart"></i>
+                                        </div>
+                                    </div>
+
+                                    <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex items-center justify-between">
+                                        <div>
+                                            <div className="text-xs uppercase tracking-wider font-semibold text-amber-600 mb-1">
+                                                Paid Completely by Self
+                                            </div>
+                                            <div className="text-2xl font-extrabold text-amber-900">
+                                                {formatINR(totalPaidBySelfClaimType)}
+                                            </div>
+                                            <p className="text-xs text-amber-600/80 mt-1">
+                                                {((totalPaidBySelfClaimType / (totalOverallExpense || 1)) * 100).toFixed(0)}% out of pocket
+                                            </p>
+                                        </div>
+                                        <div className="w-12 h-12 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center text-xl">
+                                            <i className="fa-solid fa-hand-holding-dollar"></i>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* INDIVIDUAL PAID BY TOTALS BREAKDOWN */}
+                                <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+                                    <h4 className="text-sm font-bold text-slate-900 uppercase tracking-wider mb-4 flex items-center gap-2">
+                                        <i className="fa-solid fa-users text-teal-600"></i> Individual Total Breakdown (Paid By Column)
+                                    </h4>
+                                    <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+                                        {Object.entries(paidByTotals).length === 0 ? (
+                                            <p className="text-xs text-slate-400">No payment records available.</p>
+                                        ) : (
+                                            Object.entries(paidByTotals).map(([person, sum]) => (
+                                                <div key={person} className="bg-slate-50 border border-slate-200 rounded-xl p-3.5">
+                                                    <div className="text-xs font-medium text-slate-500 mb-1 flex items-center justify-between">
+                                                        <span>{person}</span>
+                                                        <i className="fa-solid fa-user-tag text-slate-400"></i>
+                                                    </div>
+                                                    <div className="text-lg font-bold text-slate-900">
+                                                        {formatINR(sum)}
+                                                    </div>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+                                </div>
+
+                                {/* CONSOLIDATED MASTER EXPENSE TABLE */}
+                                <div className="bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden">
+                                    <div className="p-4 bg-slate-50 border-b border-slate-200 flex justify-between items-center">
+                                        <h4 className="font-bold text-slate-900 text-sm">
+                                            Master Consolidated Expenses List
+                                        </h4>
+                                        <span className="text-xs text-slate-500">
+                                            Auto-aggregated from Appointments, Admissions, Reports & Medicines
+                                        </span>
+                                    </div>
+                                    <div className="overflow-x-auto">
+                                        <table className="w-full text-left text-sm text-slate-600">
+                                            <thead className="bg-slate-100 text-xs font-semibold uppercase tracking-wider text-slate-500 border-b border-slate-200">
+                                                <tr>
+                                                    <th className="p-3.5">Category Source</th>
+                                                    <th className="p-3.5">Item Details</th>
+                                                    <th className="p-3.5">Date</th>
+                                                    <th className="p-3.5">Amount (₹)</th>
+                                                    <th className="p-3.5">Paid By</th>
+                                                    <th className="p-3.5">Claim Status</th>
+                                                </tr>
+                                            </thead>
+                                            <tbody className="divide-y divide-slate-200">
+                                                {allExpenses.length === 0 ? (
+                                                    <tr>
+                                                        <td colSpan="6" className="text-center py-8 text-slate-400">No expense records found.</td>
+                                                    </tr>
+                                                ) : (
+                                                    allExpenses.map((item) => (
+                                                        <tr key={item.id} className="hover:bg-slate-50 transition">
+                                                            <td className="p-3.5 whitespace-nowrap">
+                                                                <span className={`inline-flex items-center px-2.5 py-1 rounded-lg text-xs font-semibold border ${item.color}`}>
+                                                                    <i className={`fa-solid ${item.icon} mr-1.5`}></i>
+                                                                    {item.source}
+                                                                </span>
+                                                            </td>
+                                                            <td className="p-3.5 font-medium text-slate-900">{item.name}</td>
+                                                            <td className="p-3.5 text-xs text-slate-500 whitespace-nowrap">{item.date}</td>
+                                                            <td className="p-3.5 font-bold text-slate-900 whitespace-nowrap">
+                                                                {formatINR(item.amount)}
+                                                            </td>
+                                                            <td className="p-3.5 font-medium text-slate-800">{item.paidBy}</td>
+                                                            <td className="p-3.5">
+                                                                {item.claimType === 'Insurance' ? (
+                                                                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
+                                                                        <i className="fa-solid fa-shield-halved mr-1"></i> Claim ({item.insuranceStatus})
+                                                                    </span>
+                                                                ) : (
+                                                                    <span className="inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-semibold bg-amber-50 text-amber-800 border border-amber-200">
+                                                                        Paid by Self
+                                                                    </span>
+                                                                )}
+                                                            </td>
+                                                        </tr>
+                                                    ))
+                                                )}
+                                            </tbody>
+                                        </table>
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+
+                        {activeTab === 'insurance' && (
+                            <div className="space-y-6">
+                                {/* SUM INSURED BANNER (₹ 10,00,000) */}
+                                <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 rounded-2xl shadow-md border border-indigo-900/50 p-6 text-white">
+                                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-6 mb-6">
+                                        <div>
+                                            <div className="flex items-center gap-2 text-indigo-400 font-bold text-xs uppercase tracking-wider mb-1">
+                                                <i className="fa-solid fa-shield-heart text-indigo-400"></i> Health Insurance Policy Tracker
+                                            </div>
+                                            <h3 className="text-2xl font-black text-white">
+                                                Total Sum Insured Coverage: {formatINR(TOTAL_SUM_INSURED)}
+                                            </h3>
+                                            <p className="text-xs text-slate-300 mt-1">
+                                                Tracks all expenses flagged for insurance claim with status workflow.
+                                            </p>
+                                        </div>
+
+                                        <div className="bg-white/10 backdrop-blur-md px-4 py-3 rounded-xl border border-white/10 text-right">
+                                            <div className="text-xs text-indigo-200">Remaining Policy Balance</div>
+                                            <div className="text-xl font-bold text-emerald-400">
+                                                {formatINR(TOTAL_SUM_INSURED - insuranceStatusTotals['Claim Credited'])}
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Progress Bar of Coverage Usage */}
+                                    <div className="space-y-2">
+                                        <div className="flex justify-between text-xs text-slate-300 font-medium">
+                                            <span>Credited Claims: {formatINR(insuranceStatusTotals['Claim Credited'])}</span>
+                                            <span>Under Process / Approved: {formatINR(insuranceStatusTotals['Claim Under Process'] + insuranceStatusTotals['Pre-approved Claim Done'])}</span>
+                                            <span>Max Cap: ₹10,00,000</span>
+                                        </div>
+                                        <div className="w-full h-3 bg-slate-800 rounded-full overflow-hidden flex">
+                                            <div 
+                                                title="Credited" 
+                                                style={{ width: `${Math.min(100, (insuranceStatusTotals['Claim Credited'] / TOTAL_SUM_INSURED) * 100)}%` }} 
+                                                className="bg-emerald-500 h-full"></div>
+                                            <div 
+                                                title="Under Process" 
+                                                style={{ width: `${Math.min(100, (insuranceStatusTotals['Claim Under Process'] / TOTAL_SUM_INSURED) * 100)}%` }} 
+                                                className="bg-amber-500 h-full"></div>
+                                            <div 
+                                                title="Pre-Approved" 
+                                                style={{ width: `${Math.min(100, (insuranceStatusTotals['Pre-approved Claim Done'] / TOTAL_SUM_INSURED) * 100)}%` }} 
+                                                className="bg-blue-500 h-full"></div>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* STATUS TOTAL HEADERS */}
+                                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+                                    <div className="bg-white border-l-4 border-slate-400 rounded-xl p-4 shadow-sm border border-slate-200">
+                                        <div className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1 flex justify-between">
+                                            <span>Pending Claim</span>
+                                            <i className="fa-solid fa-clock text-slate-400"></i>
+                                        </div>
+                                        <div className="text-xl font-extrabold text-slate-800">
+                                            {formatINR(insuranceStatusTotals['Pending Claim'])}
+                                        </div>
+                                        <div className="text-xs text-slate-400 mt-1">Not yet submitted</div>
+                                    </div>
+
+                                    <div className="bg-white border-l-4 border-blue-500 rounded-xl p-4 shadow-sm border border-slate-200">
+                                        <div className="text-xs font-semibold text-blue-600 uppercase tracking-wider mb-1 flex justify-between">
+                                            <span>Pre-Approved Claim Done</span>
+                                            <i className="fa-solid fa-file-circle-check text-blue-500"></i>
+                                        </div>
+                                        <div className="text-xl font-extrabold text-blue-900">
+                                            {formatINR(insuranceStatusTotals['Pre-approved Claim Done'])}
+                                        </div>
+                                        <div className="text-xs text-blue-600/80 mt-1">Hospital cashless / approved</div>
+                                    </div>
+
+                                    <div className="bg-white border-l-4 border-amber-500 rounded-xl p-4 shadow-sm border border-slate-200">
+                                        <div className="text-xs font-semibold text-amber-600 uppercase tracking-wider mb-1 flex justify-between">
+                                            <span>Claim Under Process</span>
+                                            <i className="fa-solid fa-spinner text-amber-500 animate-spin"></i>
+                                        </div>
+                                        <div className="text-xl font-extrabold text-amber-900">
+                                            {formatINR(insuranceStatusTotals['Claim Under Process'])}
+                                        </div>
+                                        <div className="text-xs text-amber-600/80 mt-1">Submitted to TPA</div>
+                                    </div>
+
+                                    <div className="bg-white border-l-4 border-emerald-500 rounded-xl p-4 shadow-sm border border-slate-200">
+                                        <div className="text-xs font-semibold text-emerald-600 uppercase tracking-wider mb-1 flex justify-between">
+                                            <span>Claim Credited</span>
+                                            <i className="fa-solid fa-circle-check text-emerald-500"></i>
+                                        </div>
+                                        <div className="text-xl font-extrabold text-emerald-900">
+                                            {formatINR(insuranceStatusTotals['Claim Credited'])}
+                                        </div>
+                                        <div className="text-xs text-emerald-600/80 mt-1">Amount reimbursed to bank</div>
+                                    </div>
+                                </div>
+
+                                {/* LIST OF ALL INSURANCE EXPENSES WITH STATUS EDITING */}
+                                <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5">
+                                    <h4 className="font-bold text-slate-900 text-base mb-4 flex items-center justify-between">
+                                        <span>Items Marked for Insurance Reimbursement</span>
+                                        <span className="text-xs bg-indigo-50 text-indigo-700 px-3 py-1 rounded-full font-semibold border border-indigo-200">
+                                            Total Claimable: {formatINR(totalClaimableInsurance)}
+                                        </span>
+                                    </h4>
+
+                                    <div className="space-y-3">
+                                        {insuranceItems.length === 0 ? (
+                                            <p className="text-center py-8 text-slate-400 text-sm">No expenses flagged as "Will be claimed in Insurance".</p>
+                                        ) : (
+                                            insuranceItems.map((item) => (
+                                                <div key={item.id} className="p-4 rounded-xl border border-slate-200 bg-slate-50/50 hover:bg-slate-50 flex flex-col md:flex-row md:items-center justify-between gap-4 transition">
+                                                    <div>
+                                                        <div className="flex items-center gap-2 mb-1">
+                                                            <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${item.color}`}>
+                                                                {item.source}
+                                                            </span>
+                                                            <span className="text-xs text-slate-500"><i className="fa-regular fa-calendar mr-1"></i>{item.date}</span>
+                                                        </div>
+                                                        <div className="font-bold text-slate-900 text-base">{item.name}</div>
+                                                        <div className="text-xs text-slate-500 mt-1 flex items-center gap-3">
+                                                            <span>Paid By: <strong className="text-slate-800">{item.paidBy}</strong></span>
+                                                            {item.claimRef && (
+                                                                <span className="text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded font-medium">
+                                                                    Ref: {item.claimRef}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+
+                                                    <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
+                                                        <div className="text-left sm:text-right">
+                                                            <div className="text-xs text-slate-400">Claim Amount</div>
+                                                            <div className="text-lg font-extrabold text-slate-900">{formatINR(item.amount)}</div>
+                                                        </div>
+
+                                                        {/* Status Dropdown to Update Status */}
+                                                        <div>
+                                                            <select
+                                                                value={item.insuranceStatus}
+                                                                onChange={(e) => updateInsuranceStatus(item.id, e.target.value)}
+                                                                className="text-xs font-semibold px-3 py-2 rounded-lg border border-slate-300 bg-white shadow-sm focus:outline-none focus:ring-2 focus:ring-teal-500 text-slate-800 cursor-pointer">
+                                                                <option value="Pending Claim">⏳ Pending Claim</option>
+                                                                <option value="Pre-approved Claim Done">📋 Pre-approved Claim Done</option>
+                                                                <option value="Claim Under Process">🔄 Claim Under Process</option>
+                                                                <option value="Claim Credited">✅ Claim Credited</option>
+                                                            </select>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))
+                                        )}
+                                    </div>
+                                </div>
+                            </div>
+                        )}
+                    </main>
+
+                    {/* MODAL 1: EDIT PATIENT INFO */}
+                    {isPatientModalOpen && (
+                        <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+                            <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl border border-slate-200">
+                                <div className="flex justify-between items-center mb-4">
+                                    <h3 className="text-lg font-bold text-slate-900">Update Patient Profile & Notes</h3>
+                                    <button onClick={() => setIsPatientModalOpen(false)} className="text-slate-400 hover:text-slate-600">
+                                        <i className="fa-solid fa-xmark text-lg"></i>
+                                    </button>
+                                </div>
+                                <form onSubmit={(e) => { e.preventDefault(); setIsPatientModalOpen(false); }} className="space-y-4">
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Patient Name</label>
+                                        <input 
+                                            type="text" 
+                                            value={patient.name} 
+                                            onChange={(e) => setPatient({...patient, name: e.target.value})}
+                                            className="w-full p-2.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" required />
+                                    </div>
+                                    <div className="grid grid-cols-3 gap-3">
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Age (Yrs)</label>
+                                            <input 
+                                                type="number" 
+                                                value={patient.age} 
+                                                onChange={(e) => setPatient({...patient, age: e.target.value})}
+                                                className="w-full p-2.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" required />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Weight</label>
+                                            <input 
+                                                type="text" 
+                                                value={patient.weight} 
+                                                onChange={(e) => setPatient({...patient, weight: e.target.value})}
+                                                className="w-full p-2.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" required />
+                                        </div>
+                                        <div>
+                                            <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Height</label>
+                                            <input 
+                                                type="text" 
+                                                value={patient.height} 
+                                                onChange={(e) => setPatient({...patient, height: e.target.value})}
+                                                className="w-full p-2.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" required />
+                                        </div>
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Blood Sugar Baseline Summary</label>
+                                        <input 
+                                            type="text" 
+                                            value={patient.sugar} 
+                                            onChange={(e) => setPatient({...patient, sugar: e.target.value})}
+                                            className="w-full p-2.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none" required />
+                                    </div>
+                                    <div>
+                                        <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Specific Medical Notes</label>
+                                        <textarea 
+                                            rows="3" 
+                                            value={patient.notes} 
+                                            onChange={(e) => setPatient({...patient, notes: e.target.value})}
+                                            className="w-full p-2.5 text-sm border border-slate-300 rounded-lg focus:ring-2 focus:ring-teal-500 outline-none"></textarea>
+                                    </div>
+                                    <div className="flex justify-end gap-2 pt-2">
+                                        <button type="button" onClick={() => setIsPatientModalOpen(false)} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
+                                        <button type="submit" className="px-4 py-2 text-sm bg-teal-600 hover:bg-teal-700 text-white font-semibold rounded-lg shadow">Save Changes</button>
+                                    </div>
+                                </form>
+                            </div>
+                        </div>
+                    )}
+
+                    {/* MODAL 2: ADD / EDIT VITALS RECORD */}
+                    {isVitalModalOpen && (
+                        <ModalFormVitals 
+                            item={editingItem} 
+                            onClose={() => setIsVitalModalOpen(false)} 
+                            onSave={(formData) => {
+                                if (editingItem) {
+                                    setVitals(vitals.map(v => v.id === editingItem.id ? { ...formData, id: editingItem.id } : v));
+                                } else {
+                                    setVitals([{ ...formData, id: 'vit-' + Date.now() }, ...vitals]);
+                                }
+                                setIsVitalModalOpen(false);
+                            }}
+                        />
+                    )}
+
+                    {/* MODAL 3: ADD/EDIT APPOINTMENT OR ADMISSION */}
+                    {isAptModalOpen && (
+                        <ModalFormAppointment 
+                            item={editingItem} 
+                            onClose={() => setIsAptModalOpen(false)} 
+                            onSave={(formData) => {
+                                if (editingItem) {
+                                    setAppointments(appointments.map(a => a.id === editingItem.id ? { ...formData, id: editingItem.id } : a));
+                                } else {
+                                    setAppointments([...appointments, { ...formData, id: 'apt-' + Date.now() }]);
+                                }
+                                setIsAptModalOpen(false);
+                            }}
+                        />
+                    )}
+
+                    {/* MODAL 4: ADD/EDIT REPORT */}
+                    {isReportModalOpen && (
+                        <ModalFormReport 
+                            item={editingItem} 
+                            onClose={() => setIsReportModalOpen(false)} 
+                            onSave={(formData) => {
+                                if (editingItem) {
+                                    setReports(reports.map(r => r.id === editingItem.id ? { ...formData, id: editingItem.id } : r));
+                                } else {
+                                    setReports([...reports, { ...formData, id: 'rep-' + Date.now() }]);
+                                }
+                                setIsReportModalOpen(false);
+                            }}
+                        />
+                    )}
+
+                    {/* MODAL 5: ADD/EDIT MEDICINE */}
+                    {isMedModalOpen && (
+                        <ModalFormMedicine 
+                            item={editingItem} 
+                            onClose={() => setIsMedModalOpen(false)} 
+                            onSave={(formData) => {
+                                if (editingItem) {
+                                    setMedicines(medicines.map(m => m.id === editingItem.id ? { ...formData, id: editingItem.id } : m));
+                                } else {
+                                    setMedicines([...medicines, { ...formData, id: 'med-' + Date.now() }]);
+                                }
+                                setIsMedModalOpen(false);
+                            }}
+                        />
+                    )}
+                </div>
+            );
+        }
+
+        function ModalFormVitals({ item, onClose, onSave }) {
+            const [date, setDate] = useState(item?.date || new Date().toISOString().split('T')[0]);
+            const [time, setTime] = useState(item?.time || '09:00 AM');
+            const [bpSystolic, setBpSystolic] = useState(item?.bpSystolic || 120);
+            const [bpDiastolic, setBpDiastolic] = useState(item?.bpDiastolic || 80);
+            const [sugar, setSugar] = useState(item?.sugar || 120);
+            const [sugarType, setSugarType] = useState(item?.sugarType || 'Fasting');
+            const [weight, setWeight] = useState(item?.weight || 72.0);
+            const [pulse, setPulse] = useState(item?.pulse || 72);
+            const [spo2, setSpo2] = useState(item?.spo2 || 98);
+            const [temp, setTemp] = useState(item?.temp || 98.4);
+            const [notes, setNotes] = useState(item?.notes || '');
+
+            return (
+                <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl border border-slate-200 max-h-[90vh] overflow-y-auto custom-scrollbar">
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+                                <i className="fa-solid fa-heart-pulse text-rose-600"></i>
+                                {item ? 'Edit Vitals Record' : 'Record Patient Vitals'}
+                            </h3>
+                            <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><i className="fa-solid fa-xmark text-lg"></i></button>
+                        </div>
+                        <form onSubmit={(e) => { 
+                            e.preventDefault(); 
+                            onSave({ 
+                                date, 
+                                time, 
+                                bpSystolic: Number(bpSystolic), 
+                                bpDiastolic: Number(bpDiastolic), 
+                                sugar: Number(sugar), 
+                                sugarType, 
+                                weight: Number(weight), 
+                                pulse: Number(pulse), 
+                                spo2: Number(spo2), 
+                                temp: Number(temp), 
+                                notes 
+                            }); 
+                        }} className="space-y-4">
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Date</label>
+                                    <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-rose-500" required />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Time</label>
+                                    <input type="text" placeholder="09:00 AM" value={time} onChange={(e) => setTime(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-rose-500" required />
+                                </div>
+                            </div>
+
+                            {/* BP Section */}
+                            <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                                <label className="block text-xs font-bold text-slate-700 uppercase mb-2">Blood Pressure (mmHg)</label>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <span className="text-[10px] text-slate-500 block mb-1">Systolic (Top)</span>
+                                        <input type="number" placeholder="120" value={bpSystolic} onChange={(e) => setBpSystolic(e.target.value)} className="w-full p-2 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-rose-500" required />
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] text-slate-500 block mb-1">Diastolic (Bottom)</span>
+                                        <input type="number" placeholder="80" value={bpDiastolic} onChange={(e) => setBpDiastolic(e.target.value)} className="w-full p-2 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-rose-500" required />
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Blood Sugar Section */}
+                            <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                                <label className="block text-xs font-bold text-slate-700 uppercase mb-2">Blood Sugar Level</label>
+                                <div className="grid grid-cols-2 gap-3">
+                                    <div>
+                                        <span className="text-[10px] text-slate-500 block mb-1">Sugar Value (mg/dL)</span>
+                                        <input type="number" placeholder="120" value={sugar} onChange={(e) => setSugar(e.target.value)} className="w-full p-2 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-rose-500" required />
+                                    </div>
+                                    <div>
+                                        <span className="text-[10px] text-slate-500 block mb-1">Reading Type</span>
+                                        <select value={sugarType} onChange={(e) => setSugarType(e.target.value)} className="w-full p-2 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-rose-500">
+                                            <option value="Fasting">Fasting</option>
+                                            <option value="Post-Prandial (PP)">Post-Prandial (PP)</option>
+                                            <option value="Random">Random</option>
+                                            <option value="Bedtime">Bedtime</option>
+                                        </select>
+                                    </div>
+                                </div>
+                            </div>
+
+                            {/* Weight, Pulse, SpO2, Temp */}
+                            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Weight (kg)</label>
+                                    <input type="number" step="0.1" placeholder="72.0" value={weight} onChange={(e) => setWeight(e.target.value)} className="w-full p-2 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-rose-500" required />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Pulse (bpm)</label>
+                                    <input type="number" placeholder="72" value={pulse} onChange={(e) => setPulse(e.target.value)} className="w-full p-2 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-rose-500" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">SpO2 (%)</label>
+                                    <input type="number" placeholder="98" value={spo2} onChange={(e) => setSpo2(e.target.value)} className="w-full p-2 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-rose-500" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Temp (°F)</label>
+                                    <input type="number" step="0.1" placeholder="98.4" value={temp} onChange={(e) => setTemp(e.target.value)} className="w-full p-2 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-rose-500" />
+                                </div>
+                            </div>
+
+                            <div>
+                                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Notes / Observations</label>
+                                <textarea rows="2" placeholder="e.g. Taken after 30 mins morning walk..." value={notes} onChange={(e) => setNotes(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-rose-500"></textarea>
+                            </div>
+
+                            <div className="flex justify-end gap-2 pt-2">
+                                <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
+                                <button type="submit" className="px-4 py-2 text-sm bg-rose-600 hover:bg-rose-700 text-white font-semibold rounded-lg shadow">Save Vitals</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        function ModalFormAppointment({ item, onClose, onSave }) {
+            const [type, setType] = useState(item?.type || 'Appointment'); // Appointment or Admission
+            const [date, setDate] = useState(item?.date || new Date().toISOString().split('T')[0]);
+            const [drName, setDrName] = useState(item?.drName || '');
+            const [specialty, setSpecialty] = useState(item?.specialty || '');
+            const [hospitalName, setHospitalName] = useState(item?.hospitalName || '');
+            const [fees, setFees] = useState(item?.fees || '');
+            const [paidBy, setPaidBy] = useState(item?.paidBy || 'Self');
+            const [claimType, setClaimType] = useState(item?.claimType || 'Paid by Self');
+            const [insuranceStatus, setInsuranceStatus] = useState(item?.insuranceStatus || 'Pending Claim');
+
+            return (
+                <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl border border-slate-200">
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-lg font-bold text-slate-900">{item ? 'Edit Record' : 'Add Appointment or Hospital Admission'}</h3>
+                            <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><i className="fa-solid fa-xmark text-lg"></i></button>
+                        </div>
+                        <form onSubmit={(e) => { e.preventDefault(); onSave({ type, date, drName, specialty, hospitalName, fees: Number(fees), paidBy, claimType, insuranceStatus }); }} className="space-y-4">
+                            {/* TYPE SELECTOR DROPDOWN */}
+                            <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
+                                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Category Type</label>
+                                <select 
+                                    value={type} 
+                                    onChange={(e) => setType(e.target.value)} 
+                                    className="w-full p-2.5 text-sm font-semibold border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500 bg-white">
+                                    <option value="Appointment">🩺 Doctor Appointment</option>
+                                    <option value="Admission">🏥 Hospital Admission</option>
+                                </select>
+                            </div>
+
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Date</label>
+                                    <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                                        {type === 'Admission' ? 'Admission Charges (₹)' : 'Doctor Fees (₹)'}
+                                    </label>
+                                    <input type="number" placeholder="1500" value={fees} onChange={(e) => setFees(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Doctor / Specialist Name</label>
+                                <input type="text" placeholder="Dr. S. K. Sharma" value={drName} onChange={(e) => setDrName(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Specialty</label>
+                                    <input type="text" placeholder="Cardiologist" value={specialty} onChange={(e) => setSpecialty(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Hospital / Clinic Name</label>
+                                    <input type="text" placeholder="Apollo Hospital" value={hospitalName} onChange={(e) => setHospitalName(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Paid By Column</label>
+                                    <input type="text" placeholder="Self / Son / Daughter" value={paidBy} onChange={(e) => setPaidBy(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Insurance / Self</label>
+                                    <select value={claimType} onChange={(e) => setClaimType(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500">
+                                        <option value="Paid by Self">Paid by Self</option>
+                                        <option value="Insurance">Will be claimed in Insurance</option>
+                                    </select>
+                                </div>
+                            </div>
+                            {claimType === 'Insurance' && (
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Insurance Claim Status</label>
+                                    <select value={insuranceStatus} onChange={(e) => setInsuranceStatus(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500">
+                                        <option value="Pending Claim">Pending Claim</option>
+                                        <option value="Pre-approved Claim Done">Pre-approved Claim Done</option>
+                                        <option value="Claim Under Process">Claim Under Process</option>
+                                        <option value="Claim Credited">Claim Credited</option>
+                                    </select>
+                                </div>
+                            )}
+                            <div className="flex justify-end gap-2 pt-2">
+                                <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
+                                <button type="submit" className="px-4 py-2 text-sm bg-teal-600 hover:bg-teal-700 text-white font-semibold rounded-lg shadow">Save Record</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        function ModalFormReport({ item, onClose, onSave }) {
+            const [date, setDate] = useState(item?.date || new Date().toISOString().split('T')[0]);
+            const [reportName, setReportName] = useState(item?.reportName || '');
+            const [details, setDetails] = useState(item?.details || '');
+            const [cost, setCost] = useState(item?.cost || '');
+            const [paidBy, setPaidBy] = useState(item?.paidBy || 'Self');
+            const [claimType, setClaimType] = useState(item?.claimType || 'Paid by Self');
+            const [insuranceStatus, setInsuranceStatus] = useState(item?.insuranceStatus || 'Pending Claim');
+            const [fileName, setFileName] = useState(item?.fileUrl || '');
+            const [picked, setPicked] = useState(null);
+            const [busy, setBusy] = useState(false);
+            const [err, setErr] = useState('');
+
+            return (
+                <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl border border-slate-200">
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-lg font-bold text-slate-900">{item ? 'Edit Report' : 'Save / Upload Report & Prescription'}</h3>
+                            <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><i className="fa-solid fa-xmark text-lg"></i></button>
+                        </div>
+                        <form onSubmit={async (e) => {
+                            e.preventDefault();
+                            setErr('');
+                            let fid = item?.fileId || '';
+                            let ftype = item?.fileType || '';
+                            if (picked) {
+                                try {
+                                    setBusy(true);
+                                    const id = 'att-' + Date.now();
+                                    await window.__attach.save(id, picked);
+                                    if (item?.fileId) window.__attach.remove(item.fileId);
+                                    fid = id;
+                                    ftype = picked.type;
+                                } catch (ex) {
+                                    setBusy(false);
+                                    setErr('Could not upload the file. Please check your internet and try again.');
+                                    return;
+                                }
+                            }
+                            onSave({ date, reportName, details, cost: Number(cost), paidBy, claimType, insuranceStatus, fileUrl: fileName, fileId: fid, fileType: ftype });
+                        }} className="space-y-4">
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Date</label>
+                                    <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Cost / Fee (₹)</label>
+                                    <input type="number" placeholder="2500" value={cost} onChange={(e) => setCost(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Report / Prescription Name</label>
+                                <input type="text" placeholder="MRI Knee Scan / Blood Report" value={reportName} onChange={(e) => setReportName(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Details Section</label>
+                                <textarea rows="2" placeholder="Summary of findings, doctor recommendations..." value={details} onChange={(e) => setDetails(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500"></textarea>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Upload File / Report Attachment Name</label>
+                                <input type="text" placeholder="Report_Oct2026.pdf or scan photo name" value={fileName} onChange={(e) => setFileName(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" />
+                                <div className="mt-2">
+                                    <label className="inline-flex items-center gap-2 px-3 py-2 text-xs font-semibold bg-teal-50 text-teal-700 border border-teal-200 rounded-lg cursor-pointer hover:bg-teal-100">
+                                        <i className="fa-solid fa-paperclip"></i> {(picked || item?.fileId) ? 'Replace photo / PDF' : 'Attach photo / PDF'}
+                                        <input type="file" accept="image/*,application/pdf" className="hidden" onChange={async (e) => {
+                                            const f = e.target.files && e.target.files[0];
+                                            e.target.value = '';
+                                            if (!f) return;
+                                            setErr('');
+                                            try {
+                                                const p = await prepareAttachment(f);
+                                                setPicked(p);
+                                                if (!fileName) setFileName(p.name);
+                                            } catch (ex) { setErr(ex.message); }
+                                        }} />
+                                    </label>
+                                    {picked && <span className="ml-2 text-xs text-emerald-600">Ready: {picked.name} ({Math.round(picked.dataUrl.length * 0.75 / 1024)} KB)</span>}
+                                    {!picked && item?.fileId && <span className="ml-2 text-xs text-slate-500">File already attached</span>}
+                                    {err && <div className="text-xs text-rose-600 mt-1">{err}</div>}
+                                </div>
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Paid By Column</label>
+                                    <input type="text" placeholder="Self / Son" value={paidBy} onChange={(e) => setPaidBy(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Insurance / Self</label>
+                                    <select value={claimType} onChange={(e) => setClaimType(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500">
+                                        <option value="Paid by Self">Paid by Self</option>
+                                        <option value="Insurance">Will be claimed in Insurance</option>
+                                    </select>
+                                </div>
+                            </div>
+                            {claimType === 'Insurance' && (
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Insurance Claim Status</label>
+                                    <select value={insuranceStatus} onChange={(e) => setInsuranceStatus(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500">
+                                        <option value="Pending Claim">Pending Claim</option>
+                                        <option value="Pre-approved Claim Done">Pre-approved Claim Done</option>
+                                        <option value="Claim Under Process">Claim Under Process</option>
+                                        <option value="Claim Credited">Claim Credited</option>
+                                    </select>
+                                </div>
+                            )}
+                            <div className="flex justify-end gap-2 pt-2">
+                                <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
+                                <button type="submit" disabled={busy} className="px-4 py-2 text-sm bg-teal-600 hover:bg-teal-700 text-white font-semibold rounded-lg shadow disabled:opacity-60">{busy ? 'Uploading...' : 'Save Report'}</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        function ModalFormMedicine({ item, onClose, onSave }) {
+            const [name, setName] = useState(item?.name || '');
+            const [dosage, setDosage] = useState(item?.dosage || '1 Tablet');
+            const [timing, setTiming] = useState(item?.timing || 'Morning & Evening');
+            const [reminderTime, setReminderTime] = useState(item?.reminderTime || '08:00, 20:00');
+            const [cost, setCost] = useState(item?.cost || '');
+            const [paidBy, setPaidBy] = useState(item?.paidBy || 'Self');
+            const [claimType, setClaimType] = useState(item?.claimType || 'Paid by Self');
+            const [insuranceStatus, setInsuranceStatus] = useState(item?.insuranceStatus || 'Pending Claim');
+
+            return (
+                <div className="fixed inset-0 z-50 bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-xl border border-slate-200">
+                        <div className="flex justify-between items-center mb-4">
+                            <h3 className="text-lg font-bold text-slate-900">{item ? 'Edit Medicine' : 'Add Medicine & Timings'}</h3>
+                            <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><i className="fa-solid fa-xmark text-lg"></i></button>
+                        </div>
+                        <form onSubmit={(e) => { e.preventDefault(); onSave({ name, dosage, timing, reminderTime, cost: Number(cost), paidBy, claimType, insuranceStatus, reminderActive: true }); }} className="space-y-4">
+                            <div>
+                                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Medicine Name</label>
+                                <input type="text" placeholder="Glycomet 500mg" value={name} onChange={(e) => setName(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Dosage</label>
+                                    <input type="text" placeholder="1 Tablet / 5ml" value={dosage} onChange={(e) => setDosage(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Monthly Cost (₹)</label>
+                                    <input type="number" placeholder="500" value={cost} onChange={(e) => setCost(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                </div>
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Schedule / Time to Take</label>
+                                <input type="text" placeholder="Morning after food, Night before bed" value={timing} onChange={(e) => setTiming(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                            </div>
+                            <div>
+                                <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Reminder Alarm Times</label>
+                                <input type="text" placeholder="08:00, 20:00" value={reminderTime} onChange={(e) => setReminderTime(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" />
+                            </div>
+                            <div className="grid grid-cols-2 gap-3">
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Paid By Column</label>
+                                    <input type="text" placeholder="Self / Son" value={paidBy} onChange={(e) => setPaidBy(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                </div>
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Insurance / Self</label>
+                                    <select value={claimType} onChange={(e) => setClaimType(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500">
+                                        <option value="Paid by Self">Paid by Self</option>
+                                        <option value="Insurance">Will be claimed in Insurance</option>
+                                    </select>
+                                </div>
+                            </div>
+                            {claimType === 'Insurance' && (
+                                <div>
+                                    <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Insurance Claim Status</label>
+                                    <select value={insuranceStatus} onChange={(e) => setInsuranceStatus(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500">
+                                        <option value="Pending Claim">Pending Claim</option>
+                                        <option value="Pre-approved Claim Done">Pre-approved Claim Done</option>
+                                        <option value="Claim Under Process">Claim Under Process</option>
+                                        <option value="Claim Credited">Claim Credited</option>
+                                    </select>
+                                </div>
+                            )}
+                            <div className="flex justify-end gap-2 pt-2">
+                                <button type="button" onClick={onClose} className="px-4 py-2 text-sm text-slate-600 hover:bg-slate-100 rounded-lg">Cancel</button>
+                                <button type="submit" className="px-4 py-2 text-sm bg-teal-600 hover:bg-teal-700 text-white font-semibold rounded-lg shadow">Save Medicine</button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
