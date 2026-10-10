@@ -281,6 +281,26 @@
             }).format(val || 0);
         };
 
+        const getSplit = (total, o) => {
+            const t = Number(total) || 0;
+            if (o.claimType === 'Insurance') {
+                if (o.claimAmount !== undefined && o.claimAmount !== null && o.claimAmount !== '') {
+                    return { self: Number(o.selfAmount) || 0, claim: Number(o.claimAmount) || 0 };
+                }
+                return { self: 0, claim: t }; // older entries: whole amount treated as claimed
+            }
+            return { self: t, claim: 0 };
+        };
+
+        const amountsOf = (claimType, total, selfAmt, claimAmt) => {
+            if (claimType === 'Insurance') {
+                const sv = Number(selfAmt) || 0, cv = Number(claimAmt) || 0;
+                return { total: sv + cv, self: sv, claim: cv };
+            }
+            const t = Number(total) || 0;
+            return { total: t, self: t, claim: 0 };
+        };
+
         const MAX_ATTACH_CHARS = 850000;
         const prepareAttachment = (file) => new Promise((resolve, reject) => {
             const reader = new FileReader();
@@ -636,7 +656,9 @@
                         color: isAdmission ? 'text-purple-700 bg-purple-50 border-purple-200' : 'text-indigo-600 bg-indigo-50 border-indigo-200',
                         name: `${a.drName} (${a.hospitalName})`,
                         date: a.date,
-                        amount: Number(a.fees) || 0,
+                        amount: getSplit(a.fees, a).self + getSplit(a.fees, a).claim,
+                        selfAmt: getSplit(a.fees, a).self,
+                        claimAmt: getSplit(a.fees, a).claim,
                         paidBy: a.paidBy || 'Self',
                         claimType: a.claimType || 'Paid by Self',
                         insuranceStatus: a.insuranceStatus || 'Pending Claim',
@@ -654,7 +676,9 @@
                         color: 'text-emerald-600 bg-emerald-50 border-emerald-200',
                         name: r.reportName,
                         date: r.date,
-                        amount: Number(r.cost) || 0,
+                        amount: getSplit(r.cost, r).self + getSplit(r.cost, r).claim,
+                        selfAmt: getSplit(r.cost, r).self,
+                        claimAmt: getSplit(r.cost, r).claim,
                         paidBy: r.paidBy || 'Self',
                         claimType: r.claimType || 'Paid by Self',
                         insuranceStatus: r.insuranceStatus || 'Pending Claim',
@@ -672,7 +696,9 @@
                         color: 'text-amber-600 bg-amber-50 border-amber-200',
                         name: m.name + ' (' + m.dosage + ')',
                         date: 'Ongoing / Refill',
-                        amount: Number(m.cost) || 0,
+                        amount: getSplit(m.cost, m).self + getSplit(m.cost, m).claim,
+                        selfAmt: getSplit(m.cost, m).self,
+                        claimAmt: getSplit(m.cost, m).claim,
                         paidBy: m.paidBy || 'Self',
                         claimType: m.claimType || 'Paid by Self',
                         insuranceStatus: m.insuranceStatus || 'Pending Claim',
@@ -692,13 +718,12 @@
             const totalClaimableInsurance = useMemo(() => {
                 return allExpenses
                     .filter(i => i.claimType === 'Insurance')
-                    .reduce((sum, item) => sum + item.amount, 0);
+                    .reduce((sum, item) => sum + item.claimAmt, 0);
             }, [allExpenses]);
 
             const totalPaidBySelfClaimType = useMemo(() => {
                 return allExpenses
-                    .filter(i => i.claimType === 'Paid by Self')
-                    .reduce((sum, item) => sum + item.amount, 0);
+                    .reduce((sum, item) => sum + item.selfAmt, 0);
             }, [allExpenses]);
 
             // Individual Paid By Breakdown
@@ -706,7 +731,7 @@
                 const totals = {};
                 allExpenses.forEach(item => {
                     const person = item.paidBy || 'Self';
-                    totals[person] = (totals[person] || 0) + item.amount;
+                    totals[person] = (totals[person] || 0) + item.selfAmt;
                 });
                 return totals;
             }, [allExpenses]);
@@ -727,9 +752,9 @@
                 insuranceItems.forEach(item => {
                     const status = item.insuranceStatus || 'Pending Claim';
                     if (stats[status] !== undefined) {
-                        stats[status] += item.amount;
+                        stats[status] += item.claimAmt;
                     } else {
-                        stats['Pending Claim'] += item.amount;
+                        stats['Pending Claim'] += item.claimAmt;
                     }
                 });
 
@@ -1007,7 +1032,7 @@
                                                                 </td>
                                                                 <td className="p-3.5 text-slate-700">{apt.hospitalName}</td>
                                                                 <td className="p-3.5 font-bold text-slate-900 whitespace-nowrap">
-                                                                    {formatINR(apt.fees)}
+                                                                    {formatINR(apt.fees)}{apt.claimType === 'Insurance' && (<div className="text-[11px] font-medium text-slate-500">Paid {formatINR(getSplit(apt.fees, apt).self)} · Claim {formatINR(getSplit(apt.fees, apt).claim)}</div>)}
                                                                 </td>
                                                                 <td className="p-3.5">
                                                                     <span className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-medium bg-slate-100 text-slate-800 border border-slate-200">
@@ -1269,7 +1294,7 @@
                                                 <div className="space-y-2 border-t border-slate-100 pt-3 mt-2">
                                                     <div className="flex justify-between items-center text-xs">
                                                         <span className="text-slate-500">Report Cost:</span>
-                                                        <span className="font-bold text-slate-900 text-sm">{formatINR(rep.cost)}</span>
+                                                        <span className="font-bold text-slate-900 text-sm">{formatINR(rep.cost)}{rep.claimType === 'Insurance' && (<span className="block text-[11px] font-medium text-slate-500 text-right">Paid {formatINR(getSplit(rep.cost, rep).self)} · Claim {formatINR(getSplit(rep.cost, rep).claim)}</span>)}</span>
                                                     </div>
                                                     <div className="flex justify-between items-center text-xs">
                                                         <span className="text-slate-500">Paid By:</span>
@@ -1380,7 +1405,7 @@
                                                 <div className="pl-2 pt-3 border-t border-slate-100 space-y-2 text-xs">
                                                     <div className="flex justify-between items-center">
                                                         <span className="text-slate-500">Refill Cost:</span>
-                                                        <span className="font-bold text-slate-900 text-sm">{formatINR(med.cost)}</span>
+                                                        <span className="font-bold text-slate-900 text-sm">{formatINR(med.cost)}{med.claimType === 'Insurance' && (<span className="block text-[11px] font-medium text-slate-500 text-right">Paid {formatINR(getSplit(med.cost, med).self)} · Claim {formatINR(getSplit(med.cost, med).claim)}</span>)}</span>
                                                     </div>
                                                     <div className="flex justify-between items-center">
                                                         <span className="text-slate-500">Paid By:</span>
@@ -1458,7 +1483,7 @@
                                     <div className="bg-white rounded-xl shadow-sm border border-slate-200 p-5 flex items-center justify-between">
                                         <div>
                                             <div className="text-xs uppercase tracking-wider font-semibold text-amber-600 mb-1">
-                                                Paid Completely by Self
+                                                Paid by Individuals (Out of Pocket)
                                             </div>
                                             <div className="text-2xl font-extrabold text-amber-900">
                                                 {formatINR(totalPaidBySelfClaimType)}
@@ -1536,7 +1561,7 @@
                                                             <td className="p-3.5 font-medium text-slate-900">{item.name}</td>
                                                             <td className="p-3.5 text-xs text-slate-500 whitespace-nowrap">{item.date}</td>
                                                             <td className="p-3.5 font-bold text-slate-900 whitespace-nowrap">
-                                                                {formatINR(item.amount)}
+                                                                {formatINR(item.amount)}{item.claimType === 'Insurance' && (<div className="text-[11px] font-medium text-slate-500">Paid {formatINR(item.selfAmt)} · Claim {formatINR(item.claimAmt)}</div>)}
                                                             </td>
                                                             <td className="p-3.5 font-medium text-slate-800">{item.paidBy}</td>
                                                             <td className="p-3.5">
@@ -1680,7 +1705,7 @@
                                                         </div>
                                                         <div className="font-bold text-slate-900 text-base">{item.name}</div>
                                                         <div className="text-xs text-slate-500 mt-1 flex items-center gap-3">
-                                                            <span>Paid By: <strong className="text-slate-800">{item.paidBy}</strong></span>
+                                                            <span>Paid By: <strong className="text-slate-800">{item.paidBy}</strong>{item.selfAmt > 0 && <span className="text-slate-500"> (paid {formatINR(item.selfAmt)})</span>}</span>
                                                             {item.claimRef && (
                                                                 <span className="text-indigo-600 bg-indigo-50 px-2 py-0.5 rounded font-medium">
                                                                     Ref: {item.claimRef}
@@ -1692,7 +1717,7 @@
                                                     <div className="flex flex-col sm:flex-row items-start sm:items-center gap-4">
                                                         <div className="text-left sm:text-right">
                                                             <div className="text-xs text-slate-400">Claim Amount</div>
-                                                            <div className="text-lg font-extrabold text-slate-900">{formatINR(item.amount)}</div>
+                                                            <div className="text-lg font-extrabold text-slate-900">{formatINR(item.claimAmt)}</div>
                                                         </div>
 
                                                         {/* Status Dropdown to Update Status */}
@@ -1981,6 +2006,10 @@
             const [specialty, setSpecialty] = useState(item?.specialty || '');
             const [hospitalName, setHospitalName] = useState(item?.hospitalName || '');
             const [fees, setFees] = useState(item?.fees || '');
+            const insInit = item?.claimType === 'Insurance';
+            const initSplit = item ? getSplit(item.fees, item) : { self: 0, claim: 0 };
+            const [selfAmt, setSelfAmt] = useState(insInit ? String(initSplit.self) : '0');
+            const [claimAmt, setClaimAmt] = useState(insInit ? String(initSplit.claim) : '');
             const [paidBy, setPaidBy] = useState(item?.paidBy || 'Self');
             const [claimType, setClaimType] = useState(item?.claimType || 'Paid by Self');
             const [insuranceStatus, setInsuranceStatus] = useState(item?.insuranceStatus || 'Pending Claim');
@@ -1992,7 +2021,7 @@
                             <h3 className="text-lg font-bold text-slate-900">{item ? 'Edit Record' : 'Add Appointment or Hospital Admission'}</h3>
                             <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><i className="fa-solid fa-xmark text-lg"></i></button>
                         </div>
-                        <form onSubmit={(e) => { e.preventDefault(); onSave({ type, date, drName, specialty, hospitalName, fees: Number(fees), paidBy, claimType, insuranceStatus }); }} className="space-y-4">
+                        <form onSubmit={(e) => { e.preventDefault(); onSave({ type, date, drName, specialty, hospitalName, fees: amountsOf(claimType, fees, selfAmt, claimAmt).total, selfAmount: amountsOf(claimType, fees, selfAmt, claimAmt).self, claimAmount: amountsOf(claimType, fees, selfAmt, claimAmt).claim, paidBy, claimType, insuranceStatus }); }} className="space-y-4">
                             {/* TYPE SELECTOR DROPDOWN */}
                             <div className="bg-slate-50 p-3 rounded-xl border border-slate-200">
                                 <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Category Type</label>
@@ -2010,12 +2039,31 @@
                                     <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Date</label>
                                     <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
                                 </div>
+                                {claimType === 'Insurance' ? (
+                                <div className="col-span-2 bg-indigo-50/60 border border-indigo-100 rounded-xl p-3">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <span className="block text-xs font-bold text-slate-700 uppercase">Cost Split (Insurance)</span>
+                                        <span className="text-xs font-semibold text-slate-600">Total: ₹{(Number(selfAmt) || 0) + (Number(claimAmt) || 0)}</span>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div>
+                                            <span className="text-[10px] text-slate-500 block mb-1">Paid by individual (₹) - enter 0 if none</span>
+                                            <input type="number" min="0" placeholder="0" value={selfAmt} onChange={(e) => setSelfAmt(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                        </div>
+                                        <div>
+                                            <span className="text-[10px] text-slate-500 block mb-1">Amount to be claimed (₹)</span>
+                                            <input type="number" min="0" placeholder="0" value={claimAmt} onChange={(e) => setClaimAmt(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : (
                                 <div>
                                     <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
                                         {type === 'Admission' ? 'Admission Charges (₹)' : 'Doctor Fees (₹)'}
                                     </label>
                                     <input type="number" placeholder="1500" value={fees} onChange={(e) => setFees(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
                                 </div>
+                            )}
                             </div>
                             <div>
                                 <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Doctor / Specialist Name</label>
@@ -2038,7 +2086,7 @@
                                 </div>
                                 <div>
                                     <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Insurance / Self</label>
-                                    <select value={claimType} onChange={(e) => setClaimType(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500">
+                                    <select value={claimType} onChange={(e) => { const v = e.target.value; setClaimType(v); if (v === 'Insurance') { if (claimAmt === '' && fees !== '') { setClaimAmt(String(fees)); setSelfAmt('0'); } } else if (claimType === 'Insurance') { const tot = (Number(selfAmt) || 0) + (Number(claimAmt) || 0); if (tot > 0) setFees(String(tot)); } }} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500">
                                         <option value="Paid by Self">Paid by Self</option>
                                         <option value="Insurance">Will be claimed in Insurance</option>
                                     </select>
@@ -2070,6 +2118,10 @@
             const [reportName, setReportName] = useState(item?.reportName || '');
             const [details, setDetails] = useState(item?.details || '');
             const [cost, setCost] = useState(item?.cost || '');
+            const insInit = item?.claimType === 'Insurance';
+            const initSplit = item ? getSplit(item.cost, item) : { self: 0, claim: 0 };
+            const [selfAmt, setSelfAmt] = useState(insInit ? String(initSplit.self) : '0');
+            const [claimAmt, setClaimAmt] = useState(insInit ? String(initSplit.claim) : '');
             const [paidBy, setPaidBy] = useState(item?.paidBy || 'Self');
             const [claimType, setClaimType] = useState(item?.claimType || 'Paid by Self');
             const [insuranceStatus, setInsuranceStatus] = useState(item?.insuranceStatus || 'Pending Claim');
@@ -2104,17 +2156,36 @@
                                     return;
                                 }
                             }
-                            onSave({ date, reportName, details, cost: Number(cost), paidBy, claimType, insuranceStatus, fileUrl: fileName, fileId: fid, fileType: ftype });
+                            onSave({ date, reportName, details, cost: amountsOf(claimType, cost, selfAmt, claimAmt).total, selfAmount: amountsOf(claimType, cost, selfAmt, claimAmt).self, claimAmount: amountsOf(claimType, cost, selfAmt, claimAmt).claim, paidBy, claimType, insuranceStatus, fileUrl: fileName, fileId: fid, fileType: ftype });
                         }} className="space-y-4">
                             <div className="grid grid-cols-2 gap-3">
                                 <div>
                                     <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Date</label>
                                     <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
                                 </div>
+                                {claimType === 'Insurance' ? (
+                                <div className="col-span-2 bg-indigo-50/60 border border-indigo-100 rounded-xl p-3">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <span className="block text-xs font-bold text-slate-700 uppercase">Cost Split (Insurance)</span>
+                                        <span className="text-xs font-semibold text-slate-600">Total: ₹{(Number(selfAmt) || 0) + (Number(claimAmt) || 0)}</span>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div>
+                                            <span className="text-[10px] text-slate-500 block mb-1">Paid by individual (₹) - enter 0 if none</span>
+                                            <input type="number" min="0" placeholder="0" value={selfAmt} onChange={(e) => setSelfAmt(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                        </div>
+                                        <div>
+                                            <span className="text-[10px] text-slate-500 block mb-1">Amount to be claimed (₹)</span>
+                                            <input type="number" min="0" placeholder="0" value={claimAmt} onChange={(e) => setClaimAmt(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : (
                                 <div>
                                     <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Cost / Fee (₹)</label>
                                     <input type="number" placeholder="2500" value={cost} onChange={(e) => setCost(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
                                 </div>
+                            )}
                             </div>
                             <div>
                                 <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Report / Prescription Name</label>
@@ -2154,7 +2225,7 @@
                                 </div>
                                 <div>
                                     <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Insurance / Self</label>
-                                    <select value={claimType} onChange={(e) => setClaimType(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500">
+                                    <select value={claimType} onChange={(e) => { const v = e.target.value; setClaimType(v); if (v === 'Insurance') { if (claimAmt === '' && cost !== '') { setClaimAmt(String(cost)); setSelfAmt('0'); } } else if (claimType === 'Insurance') { const tot = (Number(selfAmt) || 0) + (Number(claimAmt) || 0); if (tot > 0) setCost(String(tot)); } }} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500">
                                         <option value="Paid by Self">Paid by Self</option>
                                         <option value="Insurance">Will be claimed in Insurance</option>
                                     </select>
@@ -2187,6 +2258,10 @@
             const [timing, setTiming] = useState(item?.timing || 'Morning & Evening');
             const [reminderTime, setReminderTime] = useState(item?.reminderTime || '08:00, 20:00');
             const [cost, setCost] = useState(item?.cost || '');
+            const insInit = item?.claimType === 'Insurance';
+            const initSplit = item ? getSplit(item.cost, item) : { self: 0, claim: 0 };
+            const [selfAmt, setSelfAmt] = useState(insInit ? String(initSplit.self) : '0');
+            const [claimAmt, setClaimAmt] = useState(insInit ? String(initSplit.claim) : '');
             const [paidBy, setPaidBy] = useState(item?.paidBy || 'Self');
             const [claimType, setClaimType] = useState(item?.claimType || 'Paid by Self');
             const [insuranceStatus, setInsuranceStatus] = useState(item?.insuranceStatus || 'Pending Claim');
@@ -2198,7 +2273,7 @@
                             <h3 className="text-lg font-bold text-slate-900">{item ? 'Edit Medicine' : 'Add Medicine & Timings'}</h3>
                             <button onClick={onClose} className="text-slate-400 hover:text-slate-600"><i className="fa-solid fa-xmark text-lg"></i></button>
                         </div>
-                        <form onSubmit={(e) => { e.preventDefault(); onSave({ name, dosage, timing, reminderTime, cost: Number(cost), paidBy, claimType, insuranceStatus, reminderActive: true }); }} className="space-y-4">
+                        <form onSubmit={(e) => { e.preventDefault(); onSave({ name, dosage, timing, reminderTime, cost: amountsOf(claimType, cost, selfAmt, claimAmt).total, selfAmount: amountsOf(claimType, cost, selfAmt, claimAmt).self, claimAmount: amountsOf(claimType, cost, selfAmt, claimAmt).claim, paidBy, claimType, insuranceStatus, reminderActive: true }); }} className="space-y-4">
                             <div>
                                 <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Medicine Name</label>
                                 <input type="text" placeholder="Glycomet 500mg" value={name} onChange={(e) => setName(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
@@ -2208,10 +2283,29 @@
                                     <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Dosage</label>
                                     <input type="text" placeholder="1 Tablet / 5ml" value={dosage} onChange={(e) => setDosage(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
                                 </div>
+                                {claimType === 'Insurance' ? (
+                                <div className="col-span-2 bg-indigo-50/60 border border-indigo-100 rounded-xl p-3">
+                                    <div className="flex items-center justify-between mb-2">
+                                        <span className="block text-xs font-bold text-slate-700 uppercase">Cost Split (Insurance)</span>
+                                        <span className="text-xs font-semibold text-slate-600">Total: ₹{(Number(selfAmt) || 0) + (Number(claimAmt) || 0)}</span>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-3">
+                                        <div>
+                                            <span className="text-[10px] text-slate-500 block mb-1">Paid by individual (₹) - enter 0 if none</span>
+                                            <input type="number" min="0" placeholder="0" value={selfAmt} onChange={(e) => setSelfAmt(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                        </div>
+                                        <div>
+                                            <span className="text-[10px] text-slate-500 block mb-1">Amount to be claimed (₹)</span>
+                                            <input type="number" min="0" placeholder="0" value={claimAmt} onChange={(e) => setClaimAmt(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
+                                        </div>
+                                    </div>
+                                </div>
+                            ) : (
                                 <div>
                                     <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Monthly Cost (₹)</label>
                                     <input type="number" placeholder="500" value={cost} onChange={(e) => setCost(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500" required />
                                 </div>
+                            )}
                             </div>
                             <div>
                                 <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Schedule / Time to Take</label>
@@ -2228,7 +2322,7 @@
                                 </div>
                                 <div>
                                     <label className="block text-xs font-bold text-slate-700 uppercase mb-1">Insurance / Self</label>
-                                    <select value={claimType} onChange={(e) => setClaimType(e.target.value)} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500">
+                                    <select value={claimType} onChange={(e) => { const v = e.target.value; setClaimType(v); if (v === 'Insurance') { if (claimAmt === '' && cost !== '') { setClaimAmt(String(cost)); setSelfAmt('0'); } } else if (claimType === 'Insurance') { const tot = (Number(selfAmt) || 0) + (Number(claimAmt) || 0); if (tot > 0) setCost(String(tot)); } }} className="w-full p-2.5 text-sm border border-slate-300 rounded-lg outline-none focus:ring-2 focus:ring-teal-500">
                                         <option value="Paid by Self">Paid by Self</option>
                                         <option value="Insurance">Will be claimed in Insurance</option>
                                     </select>
